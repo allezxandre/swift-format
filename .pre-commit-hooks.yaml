@@ -1,0 +1,6 @@
+- id: swift-format
+  name: Format Swift Files
+  description: "Check swift files for formating issues with swift-format"
+  entry: swift-format --in-place
+  language: swift
+  types: [swift]
