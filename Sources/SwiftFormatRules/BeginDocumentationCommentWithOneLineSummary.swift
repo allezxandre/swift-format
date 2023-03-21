@@ -162,7 +162,7 @@ public final class BeginDocumentationCommentWithOneLineSummary: SyntaxLintRule {
   ///
   /// This method is a fallback for platforms (like Linux, currently) where `String` does not
   /// support `NSLinguisticTagger` and its related APIs. It will fail to catch certain kinds of
-  /// sentences (such as those containing abbrevations that are followed by a period, like "Dr.")
+  /// sentences (such as those containing abbreviations that are followed by a period, like "Dr.")
   /// that the more advanced API can handle.
   private func nonLinguisticSentenceApproximations(in text: String) -> (
     sentences: [String], trailingText: Substring
@@ -202,16 +202,16 @@ public final class BeginDocumentationCommentWithOneLineSummary: SyntaxLintRule {
   }
 }
 
-extension Diagnostic.Message {
+extension Finding.Message {
   public static func terminateSentenceWithPeriod<Sentence: StringProtocol>(_ text: Sentence)
-    -> Diagnostic.Message
+    -> Finding.Message
   {
-    return .init(.warning, "terminate this sentence with a period: \"\(text)\"")
+    "terminate this sentence with a period: \"\(text)\""
   }
 
   public static func addBlankLineAfterFirstSentence<Sentence: StringProtocol>(_ text: Sentence)
-    -> Diagnostic.Message
+    -> Finding.Message
   {
-    return .init(.warning, "add a blank comment line after this sentence: \"\(text)\"")
+    "add a blank comment line after this sentence: \"\(text)\""
   }
 }

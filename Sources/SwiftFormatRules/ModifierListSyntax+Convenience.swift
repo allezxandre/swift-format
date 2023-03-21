@@ -26,7 +26,7 @@ extension ModifierListSyntax {
   var accessLevelModifier: DeclModifierSyntax? {
     for modifier in self {
       switch modifier.name.tokenKind {
-      case .publicKeyword, .privateKeyword, .fileprivateKeyword, .internalKeyword:
+      case .keyword(.public), .keyword(.private), .keyword(.fileprivate), .keyword(.internal):
         return modifier
       default:
         continue
@@ -46,11 +46,10 @@ extension ModifierListSyntax {
     return self
   }
 
-  /// Returns a foramatted declaration modifier token with the given name.
+  /// Returns a formatted declaration modifier token with the given name.
   func createModifierToken(name: String) -> DeclModifierSyntax {
-    let id = SyntaxFactory.makeIdentifier(name, trailingTrivia: .spaces(1))
-    let newModifier = SyntaxFactory.makeDeclModifier(
-      name: id, detailLeftParen: nil, detail: nil, detailRightParen: nil)
+    let id = TokenSyntax.identifier(name, trailingTrivia: .spaces(1))
+    let newModifier = DeclModifierSyntax(name: id, detail: nil)
     return newModifier
   }
 
@@ -86,7 +85,7 @@ extension ModifierListSyntax {
         leadingTrivia: [],
         trailingTrivia: .spaces(1))
       newModifiers.insert(formattedMod, at: 0)
-      return SyntaxFactory.makeModifierList(newModifiers)
+      return ModifierListSyntax(newModifiers)
     } else {
       return inserting(modifier, at: index)
     }

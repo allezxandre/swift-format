@@ -164,20 +164,15 @@ public class PrettyPrinter {
   ///
   /// - Parameters:
   ///   - context: The formatter context.
-  ///   - operatorContext: The operator context that defines the infix operators and precedence
-  ///     groups that should be used to make operator-sensitive formatting decisions.
   ///   - node: The node to be pretty printed.
   ///   - printTokenStream: Indicates whether debug information about the token stream should be
   ///     printed to standard output.
   ///   - whitespaceOnly: Whether only whitespace changes should be made.
-  public init(
-    context: Context, operatorContext: OperatorContext, node: Syntax, printTokenStream: Bool,
-    whitespaceOnly: Bool
-  ) {
+  public init(context: Context, node: Syntax, printTokenStream: Bool, whitespaceOnly: Bool) {
     self.context = context
     let configuration = context.configuration
-    self.tokens =
-      node.makeTokenStream(configuration: configuration, operatorContext: operatorContext)
+    self.tokens = node.makeTokenStream(
+      configuration: configuration, operatorTable: context.operatorTable)
     self.maxLineLength = configuration.lineLength
     self.spaceRemaining = self.maxLineLength
     self.printTokenStream = printTokenStream
@@ -191,7 +186,7 @@ public class PrettyPrinter {
     outputBuffer.append(String(str))
   }
 
-  /// Writes newlines into the output stream, taking into account any pre-existing consecutive
+  /// Writes newlines into the output stream, taking into account any preexisting consecutive
   /// newlines and the maximum allowed number of blank lines.
   ///
   /// This function does some implicit collapsing of consecutive newlines to ensure that the
@@ -253,7 +248,7 @@ public class PrettyPrinter {
   /// Print out the provided token, and apply line-wrapping and indentation as needed.
   ///
   /// This method takes a Token and it's length, and it keeps track of how much space is left on the
-  /// current line it is printing on. If a token exceeds the remaning space, we break to a new line,
+  /// current line it is printing on. If a token exceeds the remaining space, we break to a new line,
   /// and apply the appropriate level of indentation.
   ///
   /// - Parameters:
@@ -517,7 +512,7 @@ public class PrettyPrinter {
       write(comment.print(indent: currentIndentation))
       if wasEndOfLine {
         if comment.length > spaceRemaining {
-          diagnose(.moveEndOfLineComment)
+          diagnose(.moveEndOfLineComment, category: .endOfLineComment)
         }
       } else {
         spaceRemaining -= comment.length
@@ -554,9 +549,9 @@ public class PrettyPrinter {
       let shouldHaveTrailingComma =
         startLineNumber != openCloseBreakCompensatingLineNumber && !isSingleElement
       if shouldHaveTrailingComma && !hasTrailingComma {
-        diagnose(.addTrailingComma)
+        diagnose(.addTrailingComma, category: .trailingComma)
       } else if !shouldHaveTrailingComma && hasTrailingComma {
-        diagnose(.removeTrailingComma)
+        diagnose(.removeTrailingComma, category: .trailingComma)
       }
 
       let shouldWriteComma = whitespaceOnly ? hasTrailingComma : shouldHaveTrailingComma
@@ -574,7 +569,7 @@ public class PrettyPrinter {
   ///
   /// - Returns: A String containing the formatted source code.
   public func prettyPrint() -> String {
-    // Keep track of the indicies of the .open and .break token locations.
+    // Keep track of the indices of the .open and .break token locations.
     var delimIndexStack = [Int]()
     // Keep a running total of the token lengths.
     var total = 0
@@ -589,7 +584,7 @@ public class PrettyPrinter {
         lengths.append(0)
 
       // Open tokens have lengths equal to the total of the contents of its group. The value is
-      // calcualted when close tokens are encountered.
+      // calculated when close tokens are encountered.
       case .open:
         lengths.append(-total)
         delimIndexStack.append(i)
@@ -672,7 +667,7 @@ public class PrettyPrinter {
     }
 
     // There may be an extra break token that needs to have its length calculated.
-    assert(delimIndexStack.count < 2, "Too many unresolved delmiter token lengths.")
+    assert(delimIndexStack.count < 2, "Too many unresolved delimiter token lengths.")
     if let index = delimIndexStack.popLast() {
       if case .open = tokens[index] {
         assert(false, "Open tokens must be closed.")
@@ -773,25 +768,24 @@ public class PrettyPrinter {
     }
   }
 
-  /// Diagnoses the given message at the current location in `outputBuffer`.
-  private func diagnose(_ message: Diagnostic.Message) {
+  /// Emits a finding with the given message and category at the current location in `outputBuffer`.
+  private func diagnose(_ message: Finding.Message, category: PrettyPrintFindingCategory) {
     // Add 1 since columns uses 1-based indices.
     let column = maxLineLength - spaceRemaining + 1
-    let offset = outputBuffer.utf8.count
-    let location =
-      SourceLocation(line: lineNumber, column: column, offset: offset, file: context.fileURL.path)
-    context.diagnosticEngine?.diagnose(message, location: location)
+    context.findingEmitter.emit(
+      message,
+      category: category,
+      location: Finding.Location(file: context.fileURL.path, line: lineNumber, column: column))
   }
 }
 
-extension Diagnostic.Message {
+extension Finding.Message {
+  public static let moveEndOfLineComment: Finding.Message =
+    "move end-of-line comment that exceeds the line length"
 
-  public static let moveEndOfLineComment = Diagnostic.Message(
-    .warning, "move end-of-line comment that exceeds the line length")
+  public static let addTrailingComma: Finding.Message =
+    "add trailing comma to the last element in multiline collection literal"
 
-  public static let addTrailingComma = Diagnostic.Message(
-    .warning, "add trailing comma to the last element in multiline collection literal")
-
-  public static let removeTrailingComma = Diagnostic.Message(
-    .warning, "remove trailing comma from the last element in single line collection literal")
+  public static let removeTrailingComma: Finding.Message =
+    "remove trailing comma from the last element in single line collection literal"
 }

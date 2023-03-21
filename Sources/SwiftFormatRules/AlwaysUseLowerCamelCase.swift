@@ -29,20 +29,9 @@ public final class AlwaysUseLowerCamelCase: SyntaxLintRule {
   }
 
   public override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind {
-    // Check if this class is an `XCTestCase`, otherwise it cannot contain any test cases.
     guard context.importsXCTest == .importsXCTest else { return .visitChildren }
 
-    // Identify and store all of the function decls that are test cases.
-    let testCases = node.members.members.compactMap {
-      $0.decl.as(FunctionDeclSyntax.self)
-    }.filter {
-      // Filter out non-test methods using the same heuristics as XCTest to identify tests.
-      // Test methods are methods that start with "test", have no arguments, and void return type.
-      $0.identifier.text.starts(with: "test")
-        && $0.signature.input.parameterList.isEmpty
-        && $0.signature.output.map { $0.isVoid } ?? true
-    }
-    testCaseFuncs.formUnion(testCases)
+    collectTestMethods(from: node.members.members, into: &testCaseFuncs)
     return .visitChildren
   }
 
@@ -51,6 +40,13 @@ public final class AlwaysUseLowerCamelCase: SyntaxLintRule {
   }
 
   public override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
+    // Don't diagnose any issues when the variable is overriding, because this declaration can't
+    // rename the variable. If the user analyzes the code where the variable is really declared,
+    // then the diagnostic can be raised for just that location.
+    if let modifiers = node.modifiers, modifiers.has(modifier: "override") {
+      return .visitChildren
+    }
+
     for binding in node.bindings {
       guard let pat = binding.pattern.as(IdentifierPatternSyntax.self) else {
         continue
@@ -94,6 +90,13 @@ public final class AlwaysUseLowerCamelCase: SyntaxLintRule {
   }
 
   public override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind {
+    // Don't diagnose any issues when the function is overriding, because this declaration can't
+    // rename the function. If the user analyzes the code where the function is really declared,
+    // then the diagnostic can be raised for just that location.
+    if let modifiers = node.modifiers, modifiers.has(modifier: "override") {
+      return .visitChildren
+    }
+
     // We allow underscores in test names, because there's an existing convention of using
     // underscores to separate phrases in very detailed test names.
     let allowUnderscores = testCaseFuncs.contains(node)
@@ -121,15 +124,40 @@ public final class AlwaysUseLowerCamelCase: SyntaxLintRule {
     return .skipChildren
   }
 
+  /// Collects methods that look like XCTest test case methods from the given member list, inserting
+  /// them into the given set.
+  private func collectTestMethods(
+    from members: MemberDeclListSyntax,
+    into set: inout Set<FunctionDeclSyntax>
+  ) {
+    for member in members {
+      if let ifConfigDecl = member.decl.as(IfConfigDeclSyntax.self) {
+        // Recurse into any conditional member lists and collect their test methods as well.
+        for clause in ifConfigDecl.clauses {
+          if let clauseMembers = clause.elements?.as(MemberDeclListSyntax.self) {
+            collectTestMethods(from: clauseMembers, into: &set)
+          }
+        }
+      } else if let functionDecl = member.decl.as(FunctionDeclSyntax.self) {
+        // Identify test methods using the same heuristics as XCTest: name starts with "test", has
+        // no arguments, and returns a void type.
+        if functionDecl.identifier.text.starts(with: "test")
+          && functionDecl.signature.input.parameterList.isEmpty
+          && (functionDecl.signature.output.map(\.isVoid) ?? true)
+        {
+          set.insert(functionDecl)
+        }
+      }
+    }
+  }
+
   private func diagnoseLowerCamelCaseViolations(
     _ identifier: TokenSyntax, allowUnderscores: Bool, description: String
   ) {
     guard case .identifier(let text) = identifier.tokenKind else { return }
     if text.isEmpty { return }
     if (text.dropFirst().contains("_") && !allowUnderscores) || ("A"..."Z").contains(text.first!) {
-      diagnose(.nameMustBeLowerCamelCase(text, description: description), on: identifier) {
-        $0.highlight(identifier.sourceRange(converter: self.context.sourceLocationConverter))
-      }
+      diagnose(.nameMustBeLowerCamelCase(text, description: description), on: identifier)
     }
   }
 }
@@ -145,9 +173,9 @@ fileprivate func identifierDescription<NodeType: SyntaxProtocol>(for node: NodeT
   case .enumCaseElement: return "enum case"
   case .functionDecl: return "function"
   case .optionalBindingCondition(let binding):
-    return binding.letOrVarKeyword.tokenKind == .varKeyword ? "variable" : "constant"
+    return binding.bindingKeyword.tokenKind == .keyword(.var) ? "variable" : "constant"
   case .variableDecl(let variableDecl):
-    return variableDecl.letOrVarKeyword.tokenKind == .varKeyword ? "variable" : "constant"
+    return variableDecl.bindingKeyword.tokenKind == .keyword(.var) ? "variable" : "constant"
   default:
     return "identifier"
   }
@@ -166,10 +194,10 @@ extension ReturnClauseSyntax {
   }
 }
 
-extension Diagnostic.Message {
+extension Finding.Message {
   public static func nameMustBeLowerCamelCase(
     _ name: String, description: String
-  ) -> Diagnostic.Message {
-    return .init(.warning, "rename \(description) '\(name)' using lower-camel-case")
+  ) -> Finding.Message {
+    "rename \(description) '\(name)' using lower-camel-case"
   }
 }

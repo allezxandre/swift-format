@@ -29,20 +29,19 @@ public final class ValidateDocumentationComments: SyntaxLintRule {
 
   public override func visit(_ node: InitializerDeclSyntax) -> SyntaxVisitorContinueKind {
     return checkFunctionLikeDocumentation(
-      DeclSyntax(node), name: "init", parameters: node.parameters.parameterList, throwsOrRethrowsKeyword: node.throwsOrRethrowsKeyword)
+      DeclSyntax(node), name: "init", signature: node.signature)
   }
 
   public override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind {
     return checkFunctionLikeDocumentation(
-      DeclSyntax(node), name: node.identifier.text, parameters: node.signature.input.parameterList, throwsOrRethrowsKeyword: node.signature.throwsOrRethrowsKeyword,
+      DeclSyntax(node), name: node.identifier.text, signature: node.signature,
       returnClause: node.signature.output)
   }
 
   private func checkFunctionLikeDocumentation(
     _ node: DeclSyntax,
     name: String,
-    parameters: FunctionParameterListSyntax,
-    throwsOrRethrowsKeyword: TokenSyntax?,
+    signature: FunctionSignatureSyntax,
     returnClause: ReturnClauseSyntax? = nil
   ) -> SyntaxVisitorContinueKind {
     guard let declComment = node.docComment else { return .skipChildren }
@@ -50,7 +49,7 @@ public final class ValidateDocumentationComments: SyntaxLintRule {
     guard let params = commentInfo.parameters else { return .skipChildren }
 
     // If a single sentence summary is the only documentation, parameter(s) and
-    // returns tags may be ommitted.
+    // returns tags may be omitted.
     if commentInfo.oneSentenceSummary != nil && commentInfo.commentParagraphs!.isEmpty && params
       .isEmpty && commentInfo.returnsDescription == nil
     {
@@ -64,10 +63,10 @@ public final class ValidateDocumentationComments: SyntaxLintRule {
     }
 
     validateThrows(
-      throwsOrRethrowsKeyword, name: name, throwsDesc: commentInfo.throwsDescription, node: node)
+      signature.effectSpecifiers?.throwsSpecifier, name: name, throwsDesc: commentInfo.throwsDescription, node: node)
     validateReturn(
       returnClause, name: name, returnDesc: commentInfo.returnsDescription, node: node)
-    let funcParameters = funcParametersIdentifiers(in: parameters)
+    let funcParameters = funcParametersIdentifiers(in: signature.input.parameterList)
 
     // If the documentation of the parameters is wrong 'docCommentInfo' won't
     // parse the parameters correctly. First the documentation has to be fix
@@ -80,7 +79,7 @@ public final class ValidateDocumentationComments: SyntaxLintRule {
       return .skipChildren
     }
 
-    // Ensures that the parameters of the documantation and the function signature
+    // Ensures that the parameters of the documentation and the function signature
     // are the same.
     if (params.count != funcParameters.count) || !parametersAreEqual(
       params: params, funcParam: funcParameters)
@@ -122,7 +121,7 @@ public final class ValidateDocumentationComments: SyntaxLintRule {
     // If a function is marked as `rethrows`, it doesn't have any errors of its
     // own that should be documented. So only require documentation for
     // functions marked `throws`.
-    let needsThrowsDesc = throwsOrRethrowsKeyword?.tokenKind == .throwsKeyword
+    let needsThrowsDesc = throwsOrRethrowsKeyword?.tokenKind == .keyword(.throws)
 
     if !needsThrowsDesc && throwsDesc != nil {
       diagnose(.removeThrowsComment(funcName: name), on: throwsOrRethrowsKeyword ?? node.firstToken)
@@ -133,7 +132,7 @@ public final class ValidateDocumentationComments: SyntaxLintRule {
 }
 
 /// Iterates through every parameter of paramList and returns a list of the
-/// paramters identifiers.
+/// parameters identifiers.
 fileprivate func funcParametersIdentifiers(in paramList: FunctionParameterListSyntax) -> [String] {
   var funcParameters = [String]()
   for parameter in paramList {
@@ -159,47 +158,33 @@ fileprivate func parametersAreEqual(params: [ParseComment.Parameter], funcParam:
   return true
 }
 
-extension Diagnostic.Message {
-  public static func documentReturnValue(funcName: String) -> Diagnostic.Message {
-    return Diagnostic.Message(.warning, "document the return value of \(funcName)")
+extension Finding.Message {
+  public static func documentReturnValue(funcName: String) -> Finding.Message {
+    "document the return value of \(funcName)"
   }
 
-  public static func removeReturnComment(funcName: String) -> Diagnostic.Message {
-    return Diagnostic.Message(
-      .warning,
-      "remove the return comment of \(funcName), it doesn't return a value"
-    )
+  public static func removeReturnComment(funcName: String) -> Finding.Message {
+    "remove the return comment of \(funcName), it doesn't return a value"
   }
 
-  public static func parametersDontMatch(funcName: String) -> Diagnostic.Message {
-    return Diagnostic.Message(
-      .warning,
-      "change the parameters of \(funcName)'s documentation to match its parameters"
-    )
+  public static func parametersDontMatch(funcName: String) -> Finding.Message {
+    "change the parameters of \(funcName)'s documentation to match its parameters"
   }
 
-  public static let useSingularParameter = Diagnostic.Message(
-    .warning,
+  public static let useSingularParameter: Finding.Message =
     "replace the plural form of 'Parameters' with a singular inline form of the 'Parameter' tag"
-  )
 
-  public static let usePluralParameters = Diagnostic.Message(
-    .warning,
-    "replace the singular inline form of 'Parameter' tag with a plural 'Parameters' tag "
-      + "and group each parameter as a nested list"
-  )
+  public static let usePluralParameters: Finding.Message =
+    """
+    replace the singular inline form of 'Parameter' tag with a plural 'Parameters' tag \
+    and group each parameter as a nested list
+    """
 
-  public static func removeThrowsComment(funcName: String) -> Diagnostic.Message {
-    return Diagnostic.Message(
-      .warning,
-      "remove the 'Throws' tag for non-throwing function \(funcName)"
-    )
+  public static func removeThrowsComment(funcName: String) -> Finding.Message {
+    "remove the 'Throws' tag for non-throwing function \(funcName)"
   }
 
-  public static func documentErrorsThrown(funcName: String) -> Diagnostic.Message {
-    return Diagnostic.Message(
-      .warning,
-      "add a 'Throws' tag describing the errors thrown by \(funcName)"
-    )
+  public static func documentErrorsThrown(funcName: String) -> Finding.Message {
+    "add a 'Throws' tag describing the errors thrown by \(funcName)"
   }
 }

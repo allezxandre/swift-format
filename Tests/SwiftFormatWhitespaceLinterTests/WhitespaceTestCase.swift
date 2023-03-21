@@ -3,6 +3,7 @@ import SwiftFormatCore
 import SwiftFormatTestSupport
 import SwiftFormatWhitespaceLinter
 import SwiftSyntax
+import SwiftParser
 import XCTest
 
 class WhitespaceTestCase: DiagnosingTestCase {
@@ -19,14 +20,7 @@ class WhitespaceTestCase: DiagnosingTestCase {
   ///   - expected: The formatted text.
   ///   - linelength: The maximum allowed line length of the output.
   final func performWhitespaceLint(input: String, expected: String, linelength: Int? = nil) {
-    let sourceFileSyntax: SourceFileSyntax
-    do {
-      sourceFileSyntax = try SyntaxParser.parse(source: input)
-    } catch {
-      XCTFail("Parsing failed with error: \(error)")
-      return
-    }
-
+    let sourceFileSyntax = Parser.parse(source: input)
     var configuration = Configuration()
     if let linelength = linelength {
       configuration.lineLength = linelength

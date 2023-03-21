@@ -13,9 +13,7 @@
 import Foundation
 import SwiftFormatCore
 import SwiftSyntax
-
-// These rules will not be added to the pipeline.
-let suppressRules = ["UseEarlyExits", "UseWhereClausesInForLoops"]
+import SwiftParser
 
 /// Collects information about rules in the formatter code base.
 final class RuleCollector {
@@ -59,7 +57,8 @@ final class RuleCollector {
       guard let baseName = baseName as? String, baseName.hasSuffix(".swift") else { continue }
 
       let fileURL = url.appendingPathComponent(baseName)
-      let sourceFile = try SyntaxParser.parse(fileURL)
+      let fileInput = try String(contentsOf: fileURL)
+      let sourceFile = Parser.parse(source: fileInput)
 
       for statement in sourceFile.statements {
         guard let detectedRule = self.detectedRule(at: statement) else { continue }
@@ -99,8 +98,8 @@ final class RuleCollector {
       return nil
     }
 
-    // Make sure the rule isn't suppressed, and it must have an inheritance clause.
-    guard !suppressRules.contains(typeName), let inheritanceClause = maybeInheritanceClause else {
+    // Make sure it has an inheritance clause.
+    guard let inheritanceClause = maybeInheritanceClause else {
       return nil
     }
 

@@ -31,6 +31,7 @@ class LintPipeline: SyntaxVisitor {
   /// Creates a new lint pipeline.
   init(context: Context) {
     self.context = context
+    super.init(viewMode: .sourceAccurate)
   }
 
   override func visit(_ node: AsExprSyntax) -> SyntaxVisitorContinueKind {
@@ -62,7 +63,9 @@ class LintPipeline: SyntaxVisitor {
 
   override func visit(_ node: CodeBlockItemListSyntax) -> SyntaxVisitorContinueKind {
     visitIfEnabled(DoNotUseSemicolons.visit, for: node)
+    visitIfEnabled(NoAssignmentInExpressions.visit, for: node)
     visitIfEnabled(OneVariableDeclarationPerLine.visit, for: node)
+    visitIfEnabled(UseEarlyExits.visit, for: node)
     return .visitChildren
   }
 
@@ -103,6 +106,11 @@ class LintPipeline: SyntaxVisitor {
     visitIfEnabled(DontRepeatTypeInStaticProperties.visit, for: node)
     visitIfEnabled(NoAccessLevelOnExtensionDeclaration.visit, for: node)
     visitIfEnabled(UseTripleSlashForDocumentationComments.visit, for: node)
+    return .visitChildren
+  }
+
+  override func visit(_ node: ForInStmtSyntax) -> SyntaxVisitorContinueKind {
+    visitIfEnabled(UseWhereClausesInForLoops.visit, for: node)
     return .visitChildren
   }
 
@@ -153,8 +161,13 @@ class LintPipeline: SyntaxVisitor {
     return .visitChildren
   }
 
-  override func visit(_ node: IfStmtSyntax) -> SyntaxVisitorContinueKind {
+  override func visit(_ node: IfExprSyntax) -> SyntaxVisitorContinueKind {
     visitIfEnabled(NoParensAroundConditions.visit, for: node)
+    return .visitChildren
+  }
+
+  override func visit(_ node: InfixOperatorExprSyntax) -> SyntaxVisitorContinueKind {
+    visitIfEnabled(NoAssignmentInExpressions.visit, for: node)
     return .visitChildren
   }
 
@@ -258,7 +271,7 @@ class LintPipeline: SyntaxVisitor {
     return .visitChildren
   }
 
-  override func visit(_ node: SwitchStmtSyntax) -> SyntaxVisitorContinueKind {
+  override func visit(_ node: SwitchExprSyntax) -> SyntaxVisitorContinueKind {
     visitIfEnabled(NoParensAroundConditions.visit, for: node)
     return .visitChildren
   }
@@ -305,6 +318,7 @@ extension FormatPipeline {
     node = FullyIndirectEnum(context: context).visit(node)
     node = GroupNumericLiterals(context: context).visit(node)
     node = NoAccessLevelOnExtensionDeclaration(context: context).visit(node)
+    node = NoAssignmentInExpressions(context: context).visit(node)
     node = NoCasesWithOnlyFallthrough(context: context).visit(node)
     node = NoEmptyTrailingClosureParentheses(context: context).visit(node)
     node = NoLabelsInCasePatterns(context: context).visit(node)
@@ -314,9 +328,11 @@ extension FormatPipeline {
     node = OneVariableDeclarationPerLine(context: context).visit(node)
     node = OrderedImports(context: context).visit(node)
     node = ReturnVoidInsteadOfEmptyTuple(context: context).visit(node)
+    node = UseEarlyExits(context: context).visit(node)
     node = UseShorthandTypeNames(context: context).visit(node)
     node = UseSingleLinePropertyGetter(context: context).visit(node)
     node = UseTripleSlashForDocumentationComments(context: context).visit(node)
+    node = UseWhereClausesInForLoops(context: context).visit(node)
     return node
   }
 }

@@ -1,5 +1,7 @@
+import XCTest
+
 final class AsExprTests: PrettyPrintTestCase {
-  func testWithoutPunctuation() {
+  func testWithoutPunctuation() throws {
     let input =
       """
       func foo() {
@@ -26,7 +28,7 @@ final class AsExprTests: PrettyPrintTestCase {
     assertPrettyPrintEqual(input: input, expected: expected, linelength: 40)
   }
 
-  func testWithPunctuation() {
+  func testWithPunctuation() throws {
     let input =
       """
       func foo() {

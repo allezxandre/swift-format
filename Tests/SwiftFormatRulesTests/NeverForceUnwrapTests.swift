@@ -16,14 +16,14 @@ final class NeverForceUnwrapTests: LintOrFormatRuleTestCase {
     }
     """
     performLint(NeverForceUnwrap.self, input: input)
-    XCTAssertDiagnosed(.doNotForceCast(name: "Int"))
-    XCTAssertDiagnosed(.doNotForceUnwrap(name: "(someValue())"))
-    XCTAssertDiagnosed(.doNotForceUnwrap(name: "String(a)"))
+    XCTAssertDiagnosed(.doNotForceCast(name: "Int"), line: 3, column: 11)
+    XCTAssertDiagnosed(.doNotForceUnwrap(name: "(someValue())"), line: 4, column: 11)
+    XCTAssertDiagnosed(.doNotForceUnwrap(name: "String(a)"), line: 5, column: 11)
     XCTAssertNotDiagnosed(.doNotForceCast(name: "try"))
     XCTAssertNotDiagnosed(.doNotForceUnwrap(name: "try"))
-    XCTAssertDiagnosed(.doNotForceUnwrap(name: "a"))
-    XCTAssertDiagnosed(.doNotForceUnwrap(name: "[1: a, 2: b, 3: c][4]"))
-    XCTAssertDiagnosed(.doNotForceCast(name: "FooBarType"))
+    XCTAssertDiagnosed(.doNotForceUnwrap(name: "[1: a, 2: b, 3: c][4]"), line: 7, column: 35)
+    XCTAssertDiagnosed(.doNotForceCast(name: "FooBarType"), line: 8, column: 11)
+    XCTAssertDiagnosed(.doNotForceUnwrap(name: "a"), line: 9, column: 10)
   }
 
   func testIgnoreTestCode() {

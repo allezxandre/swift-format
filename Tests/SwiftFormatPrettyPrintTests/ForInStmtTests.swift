@@ -76,11 +76,11 @@ final class ForInStmtTests: PrettyPrintTestCase {
   func testForLoopFullWrap() {
     let input =
       """
-      for item in aVeryLargeContainterObject where largeObject.hasProperty() && condition {
+      for item in aVeryLargeContainerObject where largeObject.hasProperty() && condition {
         let a = 123
         let b = 456
       }
-      for item in aVeryLargeContainterObject where tinyObj.hasProperty() && condition {
+      for item in aVeryLargeContainerObject where tinyObj.hasProperty() && condition {
         let a = 123
         let b = 456
       }
@@ -89,7 +89,7 @@ final class ForInStmtTests: PrettyPrintTestCase {
     let expected =
       """
       for item
-        in aVeryLargeContainterObject
+        in aVeryLargeContainerObject
       where
         largeObject.hasProperty()
         && condition
@@ -98,7 +98,7 @@ final class ForInStmtTests: PrettyPrintTestCase {
         let b = 456
       }
       for item
-        in aVeryLargeContainterObject
+        in aVeryLargeContainerObject
       where tinyObj.hasProperty()
         && condition
       {
@@ -328,5 +328,54 @@ final class ForInStmtTests: PrettyPrintTestCase {
       """
 
     assertPrettyPrintEqual(input: input, expected: expected, linelength: 80)
+  }
+
+  func testForAwait() {
+    let input =
+      """
+      for await line in file {
+        print(line)
+      }
+      """
+
+    let expected =
+      """
+      for await line
+        in file
+      {
+        print(line)
+      }
+
+      """
+
+    assertPrettyPrintEqual(input: input, expected: expected, linelength: 15)
+  }
+
+  func testForTryAwait() {
+    let input =
+      """
+      for try await line in file {
+        for try await ch in line {
+          print(ch)
+        }
+      }
+      """
+
+    let expected =
+      """
+      for try await
+        line in file
+      {
+        for
+          try await
+          ch in line
+        {
+          print(ch)
+        }
+      }
+
+      """
+
+    assertPrettyPrintEqual(input: input, expected: expected, linelength: 14)
   }
 }

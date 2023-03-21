@@ -13,6 +13,7 @@
 import Foundation
 import SwiftFormatConfiguration
 import SwiftFormatCore
+import SwiftOperators
 import SwiftSyntax
 
 /// Visits the nodes of a syntax tree and constructs a linear stream of formatting tokens that
@@ -22,7 +23,7 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   private var beforeMap = [TokenSyntax: [Token]]()
   private var afterMap = [TokenSyntax: [[Token]]]()
   private let config: Configuration
-  private let operatorContext: OperatorContext
+  private let operatorTable: OperatorTable
   private let maxlinelength: Int
 
   /// The index of the most recently appended break, or nil when no break has been appended.
@@ -32,10 +33,10 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   /// appended since that break.
   private var canMergeNewlinesIntoLastBreak = false
 
-  /// Keeps track of the prefix length of multiline string segments when they are visited so that
-  /// the prefix can be stripped at the beginning of lines before the text is added to the token
-  /// stream.
-  private var pendingMultilineStringSegmentPrefixLengths = [TokenSyntax: Int]()
+  /// Keeps track of the kind of break that should be used inside a multiline string. This differs
+  /// depending on surrounding context due to some tricky special cases, so this lets us pass that
+  /// information down to the strings that need it.
+  private var pendingMultilineStringBreakKinds = [StringLiteralExprSyntax: BreakKind]()
 
   /// Lists tokens that shouldn't be appended to the token stream as `syntax` tokens. They will be
   /// printed conditionally using a different type of token.
@@ -58,10 +59,11 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   /// in a function call containing multiple trailing closures).
   private var forcedBreakingClosures = Set<SyntaxIdentifier>()
 
-  init(configuration: Configuration, operatorContext: OperatorContext) {
+  init(configuration: Configuration, operatorTable: OperatorTable) {
     self.config = configuration
-    self.operatorContext = operatorContext
+    self.operatorTable = operatorTable
     self.maxlinelength = config.lineLength
+    super.init(viewMode: .all)
   }
 
   func makeStream(from node: Syntax) -> [Token] {
@@ -133,12 +135,12 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     }
   }
 
-  private func verbatimToken(_ node: Syntax) {
+  private func verbatimToken(_ node: Syntax, indentingBehavior: IndentingBehavior = .allLines) {
     if let firstToken = node.firstToken {
       appendBeforeTokens(firstToken)
     }
 
-    appendToken(.verbatim(Verbatim(text: node.description, indentingBehavior: .allLines)))
+    appendToken(.verbatim(Verbatim(text: node.description, indentingBehavior: indentingBehavior)))
 
     if let lastToken = node.lastToken {
       // Extract any comments that trail the verbatim block since they belong to the next syntax
@@ -157,7 +159,21 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
       modifiers: node.modifiers,
       typeKeyword: node.classKeyword,
       identifier: node.identifier,
-      genericParameterClause: node.genericParameterClause,
+      genericParameterOrPrimaryAssociatedTypeClause: node.genericParameterClause.map(Syntax.init),
+      inheritanceClause: node.inheritanceClause,
+      genericWhereClause: node.genericWhereClause,
+      members: node.members)
+    return .visitChildren
+  }
+
+  override func visit(_ node: ActorDeclSyntax) -> SyntaxVisitorContinueKind {
+    arrangeTypeDeclBlock(
+      Syntax(node),
+      attributes: node.attributes,
+      modifiers: node.modifiers,
+      typeKeyword: node.actorKeyword,
+      identifier: node.identifier,
+      genericParameterOrPrimaryAssociatedTypeClause: node.genericParameterClause.map(Syntax.init),
       inheritanceClause: node.inheritanceClause,
       genericWhereClause: node.genericWhereClause,
       members: node.members)
@@ -171,7 +187,7 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
       modifiers: node.modifiers,
       typeKeyword: node.structKeyword,
       identifier: node.identifier,
-      genericParameterClause: node.genericParameterClause,
+      genericParameterOrPrimaryAssociatedTypeClause: node.genericParameterClause.map(Syntax.init),
       inheritanceClause: node.inheritanceClause,
       genericWhereClause: node.genericWhereClause,
       members: node.members)
@@ -185,7 +201,7 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
       modifiers: node.modifiers,
       typeKeyword: node.enumKeyword,
       identifier: node.identifier,
-      genericParameterClause: node.genericParameters,
+      genericParameterOrPrimaryAssociatedTypeClause: node.genericParameters.map(Syntax.init),
       inheritanceClause: node.inheritanceClause,
       genericWhereClause: node.genericWhereClause,
       members: node.members)
@@ -199,7 +215,8 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
       modifiers: node.modifiers,
       typeKeyword: node.protocolKeyword,
       identifier: node.identifier,
-      genericParameterClause: nil,
+      genericParameterOrPrimaryAssociatedTypeClause:
+        node.primaryAssociatedTypeClause.map(Syntax.init),
       inheritanceClause: node.inheritanceClause,
       genericWhereClause: node.genericWhereClause,
       members: node.members)
@@ -216,7 +233,7 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
       modifiers: node.modifiers,
       typeKeyword: node.extensionKeyword,
       identifier: lastTokenOfExtendedType,
-      genericParameterClause: nil,
+      genericParameterOrPrimaryAssociatedTypeClause: nil,
       inheritanceClause: node.inheritanceClause,
       genericWhereClause: node.genericWhereClause,
       members: node.members)
@@ -231,7 +248,7 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     modifiers: ModifierListSyntax?,
     typeKeyword: TokenSyntax,
     identifier: TokenSyntax,
-    genericParameterClause: GenericParameterClauseSyntax?,
+    genericParameterOrPrimaryAssociatedTypeClause: Syntax?,
     inheritanceClause: TypeInheritanceClauseSyntax?,
     genericWhereClause: GenericWhereClauseSyntax?,
     members: MemberDeclBlockSyntax
@@ -253,7 +270,8 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
       after(members.leftBrace, tokens: .close)
     }
 
-    let lastTokenBeforeBrace = inheritanceClause?.colon ?? genericParameterClause?.rightAngleBracket
+    let lastTokenBeforeBrace = inheritanceClause?.colon
+      ?? genericParameterOrPrimaryAssociatedTypeClause?.lastToken
       ?? identifier
     after(lastTokenBeforeBrace, tokens: .close)
 
@@ -288,9 +306,9 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
 
     // Add a non-breaking space after the identifier if it's an operator, to separate it visually
     // from the following parenthesis or generic argument list. Note that even if the function is
-    // defining a prefix or postfix operator, or even if the operator isn't originally followed by a
-    // space, the token kind always comes through as `spacedBinaryOperator`.
-    if case .spacedBinaryOperator = node.identifier.tokenKind {
+    // defining a prefix or postfix operator, the token kind always comes through as
+    // `binaryOperator`.
+    if case .binaryOperator = node.identifier.tokenKind {
       after(node.identifier.lastToken, tokens: .space)
     }
 
@@ -305,21 +323,26 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   }
 
   override func visit(_ node: InitializerDeclSyntax) -> SyntaxVisitorContinueKind {
-    let hasArguments = !node.parameters.parameterList.isEmpty
+    let hasArguments = !node.signature.input.parameterList.isEmpty
 
-    arrangeParameterClause(node.parameters, forcesBreakBeforeRightParen: node.body != nil)
+    // Prioritize keeping ") throws" together. We can only do this if the function
+    // has arguments.
+    if hasArguments && config.prioritizeKeepingFunctionOutputTogether {
+      // Due to visitation order, the matching .open break is added in ParameterClauseSyntax.
+      after(node.signature.lastToken, tokens: .close)
+    }
+
+    arrangeParameterClause(node.signature.input, forcesBreakBeforeRightParen: node.body != nil)
 
     // Prioritize keeping "<modifiers> init<punctuation>" together.
     let firstTokenAfterAttributes = node.modifiers?.firstToken ?? node.initKeyword
     before(firstTokenAfterAttributes, tokens: .open)
 
     if hasArguments || node.genericParameterClause != nil {
-      after(node.parameters.leftParen, tokens: .close)
+      after(node.signature.input.leftParen, tokens: .close)
     } else {
-      after(node.parameters.rightParen, tokens: .close)
+      after(node.signature.input.rightParen, tokens: .close)
     }
-
-    before(node.throwsOrRethrowsKeyword, tokens: .break)
 
     arrangeFunctionLikeDecl(
       Syntax(node),
@@ -374,7 +397,12 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     before(node.result.firstToken, tokens: .break)
 
     if let accessorOrCodeBlock = node.accessor {
-      arrangeAccessorOrCodeBlock(accessorOrCodeBlock)
+      switch accessorOrCodeBlock {
+      case .accessors(let accessorBlock):
+        arrangeBracesAndContents(of: accessorBlock)
+      case .getter(let codeBlock):
+        arrangeBracesAndContents(of: codeBlock, contentsKeyPath: \.statements)
+      }
     }
 
     after(node.lastToken, tokens: .close)
@@ -382,26 +410,6 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     arrangeParameterClause(node.indices, forcesBreakBeforeRightParen: true)
 
     return .visitChildren
-  }
-
-  /// Applies formatting tokens to the given syntax node, assuming that it is either an
-  /// `AccessorBlockSyntax` or a `CodeBlockSyntax`.
-  ///
-  /// - Parameter node: The syntax node to arrange.
-  private func arrangeAccessorOrCodeBlock(_ node: Syntax) {
-    switch node.as(SyntaxEnum.self) {
-    case .accessorBlock(let accessorBlock):
-      arrangeBracesAndContents(of: accessorBlock)
-    case .codeBlock(let codeBlock):
-      arrangeBracesAndContents(of: codeBlock, contentsKeyPath: \.statements)
-    default:
-      preconditionFailure(
-        """
-        This should be unreachable; we expected an AccessorBlockSyntax or a CodeBlockSyntax, but \
-        found: \(type(of: node))
-        """
-      )
-    }
   }
 
   /// Applies formatting tokens to the tokens in the given function or function-like declaration
@@ -441,6 +449,22 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
 
   override func visit(_ node: AccessorDeclSyntax) -> SyntaxVisitorContinueKind {
     arrangeAttributeList(node.attributes)
+
+    if let asyncKeyword = node.effectSpecifiers?.asyncSpecifier {
+      if node.effectSpecifiers?.throwsSpecifier != nil {
+        before(asyncKeyword, tokens: .break, .open)
+      } else {
+        before(asyncKeyword, tokens: .break)
+      }
+    }
+
+    if let throwsKeyword = node.effectSpecifiers?.throwsSpecifier {
+      before(node.effectSpecifiers?.throwsSpecifier, tokens: .break)
+      if node.effectSpecifiers?.asyncSpecifier != nil {
+        after(throwsKeyword, tokens: .close)
+      }
+    }
+
     arrangeBracesAndContents(of: node.body, contentsKeyPath: \.statements)
     return .visitChildren
   }
@@ -451,14 +475,18 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
 
   // MARK: - Control flow statement nodes
 
-  override func visit(_ node: IfStmtSyntax) -> SyntaxVisitorContinueKind {
+  override func visit(_ node: LabeledStmtSyntax) -> SyntaxVisitorContinueKind {
+    after(node.labelColon, tokens: .space)
+    return .visitChildren
+  }
+
+  override func visit(_ node: IfExprSyntax) -> SyntaxVisitorContinueKind {
     // There may be a consistent breaking group around this node, see `CodeBlockItemSyntax`. This
     // group is necessary so that breaks around and inside of the conditions aren't forced to break
     // when the if-stmt spans multiple lines.
     before(node.conditions.firstToken, tokens: .open)
     after(node.conditions.lastToken, tokens: .close)
 
-    after(node.labelColon, tokens: .space)
     after(node.ifKeyword, tokens: .space)
 
     // Add break groups, using open continuation breaks, around any conditions after the first so
@@ -485,9 +513,9 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
 
       // Breaks are only allowed after `else` when there's a comment; otherwise there shouldn't be
       // any newlines between `else` and the open brace or a following `if`.
-      if let tokenAfterElse = elseKeyword.nextToken, tokenAfterElse.leadingTrivia.hasLineComment {
+      if let tokenAfterElse = elseKeyword.nextToken(viewMode: .all), tokenAfterElse.leadingTrivia.hasLineComment {
         after(node.elseKeyword, tokens: .break(.same, size: 1))
-      } else if let elseBody = node.elseBody, elseBody.is(IfStmtSyntax.self) {
+      } else if let elseBody = node.elseBody, elseBody.is(IfExprSyntax.self) {
         after(node.elseKeyword, tokens: .space)
       }
     }
@@ -518,8 +546,23 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   }
 
   override func visit(_ node: ForInStmtSyntax) -> SyntaxVisitorContinueKind {
-    after(node.labelColon, tokens: .space)
-    after(node.forKeyword, tokens: .space)
+    // If we have a `(try) await` clause, allow breaking after the `for` so that the `(try) await`
+    // can fall onto the next line if needed, and if both `try await` are present, keep them
+    // together. Otherwise, keep `for` glued to the token after it so that we break somewhere later
+    // on the line.
+    if let awaitKeyword = node.awaitKeyword {
+      after(node.forKeyword, tokens: .break)
+      if let tryKeyword = node.tryKeyword {
+        before(tryKeyword, tokens: .open)
+        after(tryKeyword, tokens: .break)
+        after(awaitKeyword, tokens: .close, .break)
+      } else {
+        after(awaitKeyword, tokens: .break)
+      }
+    } else {
+      after(node.forKeyword, tokens: .space)
+    }
+
     after(node.caseKeyword, tokens: .space)
     before(node.inKeyword, tokens: .break)
     after(node.inKeyword, tokens: .space)
@@ -537,7 +580,6 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   }
 
   override func visit(_ node: WhileStmtSyntax) -> SyntaxVisitorContinueKind {
-    after(node.labelColon, tokens: .space)
     after(node.whileKeyword, tokens: .space)
 
     // Add break groups, using open continuation breaks, around any conditions after the first so
@@ -559,7 +601,6 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   }
 
   override func visit(_ node: RepeatWhileStmtSyntax) -> SyntaxVisitorContinueKind {
-    after(node.labelColon, tokens: .space)
     arrangeBracesAndContents(of: node.body, contentsKeyPath: \.statements)
 
     if config.lineBreakBeforeControlFlowKeywords {
@@ -579,7 +620,6 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   }
 
   override func visit(_ node: DoStmtSyntax) -> SyntaxVisitorContinueKind {
-    after(node.labelColon, tokens: .space)
     arrangeBracesAndContents(of: node.body, contentsKeyPath: \.statements)
     return .visitChildren
   }
@@ -619,7 +659,14 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   }
 
   override func visit(_ node: ReturnStmtSyntax) -> SyntaxVisitorContinueKind {
-    before(node.expression?.firstToken, tokens: .break)
+    if let expression = node.expression {
+      if leftmostMultilineStringLiteral(of: expression) != nil {
+        before(expression.firstToken, tokens: .break(.open))
+        after(expression.lastToken, tokens: .break(.close(mustBreak: false)))
+      } else {
+        before(expression.firstToken, tokens: .break)
+      }
+    }
     return .visitChildren
   }
 
@@ -633,8 +680,7 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     return .visitChildren
   }
 
-  override func visit(_ node: SwitchStmtSyntax) -> SyntaxVisitorContinueKind {
-    after(node.labelColon, tokens: .space)
+  override func visit(_ node: SwitchExprSyntax) -> SyntaxVisitorContinueKind {
     before(node.switchKeyword, tokens: .open)
     after(node.switchKeyword, tokens: .space)
     before(node.leftBrace, tokens: .break(.reset))
@@ -712,7 +758,9 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   }
 
   override func visit(_ node: YieldStmtSyntax) -> SyntaxVisitorContinueKind {
-    after(node.yieldKeyword, tokens: .break)
+    // As of https://github.com/apple/swift-syntax/pull/895, the token following a `yield` keyword
+    // *must* be on the same line, so we cannot break here.
+    after(node.yieldKeyword, tokens: .space)
     return .visitChildren
   }
 
@@ -742,7 +790,7 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
       // to exist at the EOL with the left paren or on its own line. The contents are always
       // indented on the following lines, since parens always create a scope. An open/close break
       // pair isn't used here to avoid forcing the closing paren down onto a new line.
-      if node.leftParen.nextToken?.leadingTrivia.hasLineComment ?? false {
+      if node.leftParen.nextToken(viewMode: .all)?.leadingTrivia.hasLineComment ?? false {
         after(node.leftParen, tokens: .break(.continue, size: 0))
       }
     } else if elementCount > 1 {
@@ -897,10 +945,11 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
 
     if let calledMemberAccessExpr = node.calledExpression.as(MemberAccessExprSyntax.self) {
       if let base = calledMemberAccessExpr.base, base.is(IdentifierExprSyntax.self) {
-        // When this function call is wrapped by a try-expr, the group applied when visiting the
-        // try-expr is sufficient. Adding another gruop here in that case can result in
-        // unnecessarily breaking after the try keyword.
-        if !(base.firstToken?.previousToken?.parent?.is(TryExprSyntax.self) ?? false) {
+        // When this function call is wrapped by a try-expr or await-expr, the group applied when
+        // visiting that wrapping expression is sufficient. Adding another group here in that case
+        // can result in unnecessarily breaking after the try/await keyword.
+        if !(base.firstToken?.previousToken(viewMode: .all)?.parent?.is(TryExprSyntax.self) ?? false
+          || base.firstToken?.previousToken(viewMode: .all)?.parent?.is(AwaitExprSyntax.self) ?? false) {
           before(base.firstToken, tokens: .open)
           after(calledMemberAccessExpr.name.lastToken, tokens: .close)
         }
@@ -993,21 +1042,32 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
       before(node.firstToken, tokens: .open)
     }
 
-    // If we have an open delimiter following the colon, use a space instead of a continuation
-    // break so that we don't awkwardly shift the delimiter down and indent it further if it
-    // wraps.
-    let tokenAfterColon: Token = startsWithOpenDelimiter(Syntax(node.expression)) ? .space : .break
+    var additionalEndTokens = [Token]()
+    if let colon = node.colon {
+      // If we have an open delimiter following the colon, use a space instead of a continuation
+      // break so that we don't awkwardly shift the delimiter down and indent it further if it
+      // wraps.
+      var tokensAfterColon: [Token] = [
+        startsWithOpenDelimiter(Syntax(node.expression)) ? .space : .break
+      ]
 
-    after(node.colon, tokens: tokenAfterColon)
+      if leftmostMultilineStringLiteral(of: node.expression) != nil {
+        tokensAfterColon.append(.break(.open(kind: .block), size: 0))
+        additionalEndTokens = [.break(.close(mustBreak: false), size: 0)]
+      }
+
+      after(colon, tokens: tokensAfterColon)
+    }
 
     if let trailingComma = node.trailingComma {
+      before(trailingComma, tokens: additionalEndTokens)
       var afterTrailingComma: [Token] = [.break(.same)]
       if shouldGroup {
         afterTrailingComma.insert(.close, at: 0)
       }
       after(trailingComma, tokens: afterTrailingComma)
     } else if shouldGroup {
-      after(node.lastToken, tokens: .close)
+      after(node.lastToken, tokens: additionalEndTokens + [.close])
     }
   }
 
@@ -1050,6 +1110,9 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   override func visit(_ node: ClosureSignatureSyntax) -> SyntaxVisitorContinueKind {
     before(node.firstToken, tokens: .open)
 
+    arrangeAttributeList(
+      node.attributes, suppressFinalBreak: node.input == nil && node.capture == nil)
+
     if let input = node.input {
       // We unconditionally put a break before the `in` keyword below, so we should only put a break
       // after the capture list's right bracket if there are arguments following it or we'll end up
@@ -1087,7 +1150,13 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
       }
     }
 
-    before(node.throwsTok, tokens: .break)
+    before(node.effectSpecifiers?.asyncSpecifier, tokens: .break)
+    before(node.effectSpecifiers?.throwsSpecifier, tokens: .break)
+    if let asyncKeyword = node.effectSpecifiers?.asyncSpecifier, let throwsTok = node.effectSpecifiers?.throwsSpecifier {
+      before(asyncKeyword, tokens: .open)
+      after(throwsTok, tokens: .close)
+    }
+
     before(node.output?.arrow, tokens: .break)
     after(node.lastToken, tokens: .close)
     before(node.inTok, tokens: .break(.same))
@@ -1158,13 +1227,18 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     return .skipChildren
   }
 
-  override func visit(_ node: ObjcKeyPathExprSyntax) -> SyntaxVisitorContinueKind {
+  override func visit(_ node: MacroExpansionDeclSyntax) -> SyntaxVisitorContinueKind {
+    arrangeFunctionCallArgumentList(
+      node.argumentList,
+      leftDelimiter: node.leftParen,
+      rightDelimiter: node.rightParen,
+      forcesBreakBeforeRightDelimiter: false)
     return .visitChildren
   }
 
-  override func visit(_ node: ObjectLiteralExprSyntax) -> SyntaxVisitorContinueKind {
+  override func visit(_ node: MacroExpansionExprSyntax) -> SyntaxVisitorContinueKind {
     arrangeFunctionCallArgumentList(
-      node.arguments,
+      node.argumentList,
       leftDelimiter: node.leftParen,
       rightDelimiter: node.rightParen,
       forcesBreakBeforeRightDelimiter: false)
@@ -1200,7 +1274,16 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   }
 
   override func visit(_ node: ReturnClauseSyntax) -> SyntaxVisitorContinueKind {
-    after(node.arrow, tokens: .space)
+    if node.parent?.is(FunctionTypeSyntax.self) ?? false {
+      // `FunctionTypeSyntax` used to not use `ReturnClauseSyntax` and had 
+      // slightly different formatting behavior than the normal 
+      // `ReturnClauseSyntax`. To maintain the previous formatting behavior, 
+      // add a special case.
+      before(node.arrow, tokens: .break)
+      before(node.returnType.firstToken, tokens: .break)
+    } else {
+      after(node.arrow, tokens: .space)
+    }
 
     // Member type identifier is used when the return type is a member of another type. Add a group
     // here so that the base, dot, and member type are kept together when they fit.
@@ -1241,13 +1324,21 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     // Unlike other code blocks, where we may want a single statement to be laid out on the same
     // line as a parent construct, the content of an `#if` block must always be on its own line;
     // the newline token inserted at the end enforces this.
-    if let lastElemTok = node.elements.lastToken {
+    if let lastElemTok = node.elements?.lastToken {
       after(lastElemTok, tokens: .break(breakKindClose, newlines: .soft), .close)
     } else {
-      before(tokenToOpenWith.nextToken, tokens: .break(breakKindClose, newlines: .soft), .close)
+      before(tokenToOpenWith.nextToken(viewMode: .all), tokens: .break(breakKindClose, newlines: .soft), .close)
     }
 
-    if let condition = node.condition {
+    if isNestedInPostfixIfConfig(node: Syntax(node)) {
+      before(
+        node.firstToken,
+        tokens: [
+          .printerControl(kind: .enableBreaking),
+          .break(.reset),
+        ]
+      )
+    } else if let condition = node.condition {
       before(condition.firstToken, tokens: .printerControl(kind: .disableBreaking))
       after(
         condition.lastToken,
@@ -1307,10 +1398,14 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   }
 
   override func visit(_ node: OperatorPrecedenceAndTypesSyntax) -> SyntaxVisitorContinueKind {
-    // Despite being an `IdentifierListSyntax`, the language grammar currently only allows a single
-    // precedence group here, so we don't worry about breaks at any interior commas.
-    after(node.colon, tokens: .break(.open))
-    after(node.lastToken, tokens: .break(.close, size: 0))
+    before(node.colon, tokens: .space)
+    after(node.colon, tokens: .break(.open), .open)
+    after(node.designatedTypes.lastToken ?? node.lastToken, tokens: .break(.close, size: 0), .close)
+    return .visitChildren
+  }
+
+  override func visit(_ node: DesignatedTypeElementSyntax) -> SyntaxVisitorContinueKind {
+    after(node.leadingComma, tokens: .break(.same))
     return .visitChildren
   }
 
@@ -1321,12 +1416,6 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
       arrangeParameterClause(associatedValue, forcesBreakBeforeRightParen: false)
     }
 
-    return .visitChildren
-  }
-
-  override func visit(_ node: ObjcSelectorExprSyntax) -> SyntaxVisitorContinueKind {
-    after(node.leftParen, tokens: .break(.open, size: 0), .open)
-    before(node.rightParen, tokens: .break(.close(mustBreak: false), size: 0), .close)
     return .visitChildren
   }
 
@@ -1366,10 +1455,6 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     return .visitChildren
   }
 
-  override func visit(_ node: AccessLevelModifierSyntax) -> SyntaxVisitorContinueKind {
-    return .visitChildren
-  }
-
   override func visit(_ node: CodeBlockSyntax) -> SyntaxVisitorContinueKind {
     return .visitChildren
   }
@@ -1395,7 +1480,8 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
 
     // This group applies to a top-level if-stmt so that all of the bodies will have the same
     // breaking behavior.
-    if let ifStmt = node.item.as(IfStmtSyntax.self) {
+    if let exprStmt = node.item.as(ExpressionStmtSyntax.self),
+       let ifStmt = exprStmt.expression.as(IfExprSyntax.self) {
       before(ifStmt.conditions.firstToken, tokens: .open(.consistent))
       after(ifStmt.lastToken, tokens: .close)
     }
@@ -1403,6 +1489,12 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   }
 
   override func visit(_ node: GenericParameterClauseSyntax) -> SyntaxVisitorContinueKind {
+    after(node.leftAngleBracket, tokens: .break(.open, size: 0), .open(argumentListConsistency()))
+    before(node.rightAngleBracket, tokens: .break(.close, size: 0), .close)
+    return .visitChildren
+  }
+
+  override func visit(_ node: PrimaryAssociatedTypeClauseSyntax) -> SyntaxVisitorContinueKind {
     after(node.leftAngleBracket, tokens: .break(.open, size: 0), .open(argumentListConsistency()))
     before(node.rightAngleBracket, tokens: .break(.close, size: 0), .close)
     return .visitChildren
@@ -1436,10 +1528,8 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   override func visit(_ node: FunctionTypeSyntax) -> SyntaxVisitorContinueKind {
     after(node.leftParen, tokens: .break(.open, size: 0), .open)
     before(node.rightParen, tokens: .break(.close, size: 0), .close)
-    before(node.asyncKeyword, tokens: .break)
-    before(node.throwsOrRethrowsKeyword, tokens: .break)
-    before(node.arrow, tokens: .break)
-    before(node.returnType.firstToken, tokens: .break)
+    before(node.effectSpecifiers?.asyncSpecifier, tokens: .break)
+    before(node.effectSpecifiers?.throwsSpecifier, tokens: .break)
     return .visitChildren
   }
 
@@ -1461,7 +1551,7 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
       tokens: .break(.continue, newlines: .elective(ignoresDiscretionary: true)))
 
     // Check for an anchor token inside of the expression to group with the try keyword.
-    if let anchorToken = findTryExprConnectingToken(inExpr: node.expression) {
+    if let anchorToken = findTryAwaitExprConnectingToken(inExpr: node.expression) {
       before(node.tryKeyword, tokens: .open)
       after(anchorToken, tokens: .close)
     }
@@ -1469,24 +1559,44 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     return .visitChildren
   }
 
+  override func visit(_ node: AwaitExprSyntax) -> SyntaxVisitorContinueKind {
+    before(
+      node.expression.firstToken,
+      tokens: .break(.continue, newlines: .elective(ignoresDiscretionary: true)))
+
+    // Check for an anchor token inside of the expression to group with the await keyword.
+    if !(node.parent?.is(TryExprSyntax.self) ?? false),
+      let anchorToken = findTryAwaitExprConnectingToken(inExpr: node.expression)
+    {
+      before(node.awaitKeyword, tokens: .open)
+      after(anchorToken, tokens: .close)
+    }
+
+    return .visitChildren
+  }
+
   /// Searches the AST from `expr` to find a token that should be grouped with an enclosing
-  /// try-expr. Returns that token, or nil when no such token is found.
+  /// try-expr or await-expr. Returns that token, or nil when no such token is found.
   ///
-  /// - Parameter expr: An expression that is wrapped by a try-expr.
-  /// - Returns: A token that should be grouped with the try-expr, or nil.
-  func findTryExprConnectingToken(inExpr expr: ExprSyntax) -> TokenSyntax? {
+  /// - Parameter expr: An expression that is wrapped by a try-expr or await-expr.
+  /// - Returns: A token that should be grouped with the try-expr or await-expr, or nil.
+  func findTryAwaitExprConnectingToken(inExpr expr: ExprSyntax) -> TokenSyntax? {
+    if let awaitExpr = expr.as(AwaitExprSyntax.self) {
+      // If we were called from the `try` of a `try await <expr>`, drill into the child expression.
+      return findTryAwaitExprConnectingToken(inExpr: awaitExpr.expression)
+    }
     if let callingExpr = expr.asProtocol(CallingExprSyntaxProtocol.self) {
-      return findTryExprConnectingToken(inExpr: callingExpr.calledExpression)
+      return findTryAwaitExprConnectingToken(inExpr: callingExpr.calledExpression)
     }
     if let memberAccessExpr = expr.as(MemberAccessExprSyntax.self), let base = memberAccessExpr.base
     {
-      // When there's a simple base (i.e. identifier), group the entire `try <base>.<name>`
+      // When there's a simple base (i.e. identifier), group the entire `try/await <base>.<name>`
       // sequence. This check has to happen here so that the `MemberAccessExprSyntax.name` is
       // available.
       if base.is(IdentifierExprSyntax.self) {
         return memberAccessExpr.name.lastToken
       }
-      return findTryExprConnectingToken(inExpr: base)
+      return findTryAwaitExprConnectingToken(inExpr: base)
     }
     if expr.is(IdentifierExprSyntax.self) {
       return expr.lastToken
@@ -1500,29 +1610,24 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
 
   override func visit(_ node: AttributeSyntax) -> SyntaxVisitorContinueKind {
     before(node.firstToken, tokens: .open)
-    if node.argument != nil {
+    switch node.argument {
+    case .argumentList(let argumentList)?:
+      if let leftParen = node.leftParen, let rightParen = node.rightParen {
+        arrangeFunctionCallArgumentList(
+          argumentList,
+          leftDelimiter: leftParen,
+          rightDelimiter: rightParen,
+          forcesBreakBeforeRightDelimiter: false)
+      }
+    case .some:
       // Wrap the attribute's arguments in their own group, so arguments stay together with a higher
       // affinity than the overall attribute (e.g. allows a break after the opening "(" and then
       // having the entire argument list on 1 line). Necessary spaces and breaks are added inside of
       // the argument, using type specific visitor methods.
       after(node.leftParen, tokens: .break(.open, size: 0), .open(argumentListConsistency()))
       before(node.rightParen, tokens: .break(.close, size: 0), .close)
-    }
-    after(node.lastToken, tokens: .close)
-    return .visitChildren
-  }
-
-  override func visit(_ node: CustomAttributeSyntax) -> SyntaxVisitorContinueKind {
-    // "Custom attributes" are better known to users as "property wrappers".
-    before(node.firstToken, tokens: .open)
-    if let argumentList = node.argumentList,
-      let leftParen = node.leftParen, let rightParen = node.rightParen
-    {
-      arrangeFunctionCallArgumentList(
-        argumentList,
-        leftDelimiter: leftParen,
-        rightDelimiter: rightParen,
-        forcesBreakBeforeRightDelimiter: false)
+    case nil:
+      break
     }
     after(node.lastToken, tokens: .close)
     return .visitChildren
@@ -1544,10 +1649,6 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     before(node.firstToken, tokens: .open)
     after(node.platform, tokens: .break(.continue, size: 1))
     after(node.lastToken, tokens: .close)
-    return .visitChildren
-  }
-
-  override func visit(_ node: ElseBlockSyntax) -> SyntaxVisitorContinueKind {
     return .visitChildren
   }
 
@@ -1634,13 +1735,28 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   }
 
   override func visit(_ node: DeclModifierSyntax) -> SyntaxVisitorContinueKind {
-    after(node.lastToken, tokens: .break)
+    // Due to the way we currently use spaces after let/var keywords in variable bindings, we need
+    // this special exception for `async let` statements to avoid breaking prematurely between the
+    // `async` and `let` keywords.
+    let breakOrSpace: Token
+    if node.name.tokenKind == .keyword(.async) {
+      breakOrSpace = .space
+    } else {
+      breakOrSpace = .break
+    }
+    after(node.lastToken, tokens: breakOrSpace)
     return .visitChildren
   }
 
   override func visit(_ node: FunctionSignatureSyntax) -> SyntaxVisitorContinueKind {
-    before(node.asyncKeyword, tokens: .break)
-    before(node.throwsOrRethrowsKeyword, tokens: .break)
+    before(node.effectSpecifiers?.asyncSpecifier, tokens: .break)
+    before(node.effectSpecifiers?.throwsSpecifier, tokens: .break)
+    if let asyncOrReasyncKeyword = node.effectSpecifiers?.asyncSpecifier,
+      let throwsOrRethrowsKeyword = node.effectSpecifiers?.throwsSpecifier
+    {
+      before(asyncOrReasyncKeyword, tokens: .open)
+      after(throwsOrRethrowsKeyword, tokens: .close)
+    }
     before(node.output?.firstToken, tokens: .break)
     return .visitChildren
   }
@@ -1653,123 +1769,133 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     return .visitChildren
   }
 
-  override func visit(_ node: SequenceExprSyntax) -> SyntaxVisitorContinueKind {
-    let elementCount = node.elements.count
-    assert(elementCount > 0 && elementCount <= 3, "SequenceExpr should have already been folded.")
+  override func visit(_ node: InfixOperatorExprSyntax) -> SyntaxVisitorContinueKind {
+    // FIXME: This is a workaround/hack for https://github.com/apple/swift-syntax/issues/928. For
+    // keypaths like `\.?.foo`, they get represented (after folding) as an infix operator expression
+    // with an empty keypath, followed by the "binary operator" `.?.`, followed by other
+    // expressions. We can detect this and treat the whole thing as a verbatim node, which mimics
+    // what we do today for keypaths (i.e., nothing).
+    if let keyPathExpr = node.leftOperand.as(KeyPathExprSyntax.self),
+      keyPathExpr.components.isEmpty
+    {
+      // If there were spaces in the trailing trivia of the previous token, they would have been
+      // ignored (since this expression would be expected to insert its own preceding breaks).
+      // Preserve that whitespace verbatim for now.
+      if let previousToken = node.firstToken?.previousToken {
+        appendTrailingTrivia(previousToken, forced: true)
+      }
+      verbatimToken(Syntax(node), indentingBehavior: .none)
+      return .skipChildren
+    }
 
-    var iterator = node.elements.makeIterator()
-    let lhs = iterator.next()!
-    maybeGroupAroundSubexpression(lhs)
+    let binOp = node.operatorOperand
+    let rhs = node.rightOperand
+    maybeGroupAroundSubexpression(rhs, combiningOperator: binOp)
 
-    if elementCount == 2 {
-      // Cast expressions are 2-element sequence expressions, containing the left-hand side followed
-      // by a single `AsExpr` or `IsExpr` node that holds both the keyword and the right-hand type
-      // expression.
-      let castOp = iterator.next()!
+    let wrapsBeforeOperator = !isAssigningOperator(binOp)
 
-      before(castOp.firstToken, tokens: .break(.continue), .open)
-      after(castOp.lastToken, tokens: .close)
-    } else if elementCount == 3 {
-      // Binary operators (and other syntax that isn't considered strictly a "binary" operator, like
-      // assignment expressions) are covered by 3-element sequence expressions.
-      let binOp = iterator.next()!
-      let rhs = iterator.next()!
-      maybeGroupAroundSubexpression(rhs, combiningOperator: binOp)
+    if shouldRequireWhitespace(around: binOp) {
+      if isAssigningOperator(binOp) {
+        var beforeTokens: [Token]
 
-      let wrapsBeforeOperator = !isAssigningOperator(binOp)
-
-      if shouldRequireWhitespace(around: binOp) {
-        if isAssigningOperator(binOp) {
-          var beforeTokens: [Token]
-
-          // If the rhs starts with a parenthesized expression, stack indentation around it.
-          // Otherwise, use regular continuation breaks.
-          if let (unindentingNode, _) = stackedIndentationBehavior(after: binOp, rhs: rhs) {
-            beforeTokens = [.break(.open(kind: .continuation))]
-            after(unindentingNode.lastToken, tokens: [.break(.close(mustBreak: false), size: 0)])
-          } else {
-            beforeTokens = [.break(.continue)]
-          }
-
-          // When the RHS is a simple expression, even if is requires multiple lines, we don't add a
-          // group so that as much of the expression as possible can stay on the same line as the
-          // operator token.
-          if isCompoundExpression(rhs) {
-            beforeTokens.append(.open)
-            after(rhs.lastToken, tokens: .close)
-          }
-
-          after(binOp.lastToken, tokens: beforeTokens)
-        } else if let (unindentingNode, shouldReset) =
-          stackedIndentationBehavior(after: binOp, rhs: rhs)
+        // If the rhs starts with a parenthesized expression, stack indentation around it.
+        // Otherwise, use regular continuation breaks.
+        if let (unindentingNode, _, breakKind) = stackedIndentationBehavior(after: binOp, rhs: rhs)
         {
-          // For parenthesized expressions and for unparenthesized usages of `&&` and `||`, we don't
-          // want to treat all continue breaks the same. If we did, then all operators would line up
-          // at the same alignment regardless of whether they were, for example, `&&` or something
-          // between a pair of `&&`. To make long expressions/conditionals format more cleanly, we
-          // use open-continuation/close pairs around such operators and their right-hand sides so
-          // that the continuation breaks inside those scopes "stack", instead of receiving the
-          // usual single-level "continuation line or not" behavior.
-          let openBreakTokens: [Token] = [.break(.open(kind: .continuation)), .open]
-          if wrapsBeforeOperator {
-            before(binOp.firstToken, tokens: openBreakTokens)
-          } else {
-            after(binOp.lastToken, tokens: openBreakTokens)
-          }
-
-          let closeBreakTokens: [Token] =
-            (shouldReset ? [.break(.reset, size: 0)] : [])
-            + [.break(.close(mustBreak: false), size: 0), .close]
-          after(unindentingNode.lastToken, tokens: closeBreakTokens)
+          beforeTokens = [.break(.open(kind: breakKind))]
+          after(unindentingNode.lastToken, tokens: [.break(.close(mustBreak: false), size: 0)])
         } else {
-          if wrapsBeforeOperator {
-            before(binOp.firstToken, tokens: .break(.continue))
-          } else {
-            after(binOp.lastToken, tokens: .break(.continue))
-          }
+          beforeTokens = [.break(.continue)]
         }
 
+        // When the RHS is a simple expression, even if is requires multiple lines, we don't add a
+        // group so that as much of the expression as possible can stay on the same line as the
+        // operator token.
+        if isCompoundExpression(rhs) {
+          beforeTokens.append(.open)
+          after(rhs.lastToken, tokens: .close)
+        }
+
+        after(binOp.lastToken, tokens: beforeTokens)
+      } else if let (unindentingNode, shouldReset, breakKind) =
+        stackedIndentationBehavior(after: binOp, rhs: rhs)
+      {
+        // For parenthesized expressions and for unparenthesized usages of `&&` and `||`, we don't
+        // want to treat all continue breaks the same. If we did, then all operators would line up
+        // at the same alignment regardless of whether they were, for example, `&&` or something
+        // between a pair of `&&`. To make long expressions/conditionals format more cleanly, we
+        // use open-continuation/close pairs around such operators and their right-hand sides so
+        // that the continuation breaks inside those scopes "stack", instead of receiving the
+        // usual single-level "continuation line or not" behavior.
+        let openBreakTokens: [Token] = [.break(.open(kind: breakKind)), .open]
         if wrapsBeforeOperator {
-          after(binOp.lastToken, tokens: .space)
+          before(binOp.firstToken, tokens: openBreakTokens)
         } else {
-          before(binOp.firstToken, tokens: .space)
+          after(binOp.lastToken, tokens: openBreakTokens)
         }
+
+        let closeBreakTokens: [Token] =
+          (shouldReset ? [.break(.reset, size: 0)] : [])
+          + [.break(.close(mustBreak: false), size: 0), .close]
+        after(unindentingNode.lastToken, tokens: closeBreakTokens)
+      } else {
+        if wrapsBeforeOperator {
+          before(binOp.firstToken, tokens: .break(.continue))
+        } else {
+          after(binOp.lastToken, tokens: .break(.continue))
+        }
+      }
+
+      if wrapsBeforeOperator {
+        after(binOp.lastToken, tokens: .space)
+      } else {
+        before(binOp.firstToken, tokens: .space)
       }
     }
 
     return .visitChildren
   }
 
-  override func visit(_ node: AssignmentExprSyntax) -> SyntaxVisitorContinueKind {
-    // Breaks and spaces are inserted at the `SequenceExpr` level.
+  override func visit(_ node: PrefixOperatorExprSyntax) -> SyntaxVisitorContinueKind {
     return .visitChildren
   }
 
-  override func visit(_ node: BinaryOperatorExprSyntax) -> SyntaxVisitorContinueKind {
-    // Breaks and spaces are inserted at the `SequenceExpr` level.
+  override func visit(_ node: PostfixUnaryExprSyntax) -> SyntaxVisitorContinueKind {
     return .visitChildren
   }
 
   override func visit(_ node: AsExprSyntax) -> SyntaxVisitorContinueKind {
-    // The break before the `as` keyword is inserted at the `SequenceExpr` level so that it is
-    // placed in the correct relative position to the group surrounding the cast operator and type
-    // expression.
+    before(node.asTok, tokens: .break(.continue), .open)
     before(node.typeName.firstToken, tokens: .space)
+    after(node.lastToken, tokens: .close)
     return .visitChildren
   }
 
   override func visit(_ node: IsExprSyntax) -> SyntaxVisitorContinueKind {
-    // The break before the `is` keyword is inserted at the `SequenceExpr` level so that it is
-    // placed in the correct relative position to the group surrounding the cast operator and type
-    // expression.
+    before(node.isTok, tokens: .break(.continue), .open)
     before(node.typeName.firstToken, tokens: .space)
+    after(node.lastToken, tokens: .close)
+    return .visitChildren
+  }
+
+  override func visit(_ node: SequenceExprSyntax) -> SyntaxVisitorContinueKind {
+    preconditionFailure("SequenceExpr should have already been folded.")
+  }
+
+  override func visit(_ node: AssignmentExprSyntax) -> SyntaxVisitorContinueKind {
+    // Breaks and spaces are inserted at the `InfixOperatorExpr` level.
+    return .visitChildren
+  }
+
+  override func visit(_ node: BinaryOperatorExprSyntax) -> SyntaxVisitorContinueKind {
+    // Breaks and spaces are inserted at the `InfixOperatorExpr` level.
     return .visitChildren
   }
 
   override func visit(_ node: ArrowExprSyntax) -> SyntaxVisitorContinueKind {
-    // The break before the `throws` keyword is inserted at the `SequenceExpr` level so that it is
-    // placed in the correct relative position to the group surrounding the "operator".
-    after(node.throwsToken, tokens: .break)
+    // The break before the `throws` keyword is inserted at the `InfixOperatorExpr` level so that it
+    // is placed in the correct relative position to the group surrounding the "operator".
+    after(node.effectSpecifiers?.throwsSpecifier, tokens: .break)
     return .visitChildren
   }
 
@@ -1783,14 +1909,14 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     if node.bindings.count == 1 {
       // If there is only a single binding, don't allow a break between the `let/var` keyword and
       // the identifier; there are better places to break later on.
-      after(node.letOrVarKeyword, tokens: .space)
+      after(node.bindingKeyword, tokens: .space)
     } else {
       // If there is more than one binding, we permit an open-break after `let/var` so that each of
       // the comma-delimited items will potentially receive indentation. We also add a group around
       // the individual bindings to bind them together better. (This is done here, not in
       // `visit(_: PatternBindingSyntax)`, because we only want that behavior when there are
       // multiple bindings.)
-      after(node.letOrVarKeyword, tokens: .break(.open))
+      after(node.bindingKeyword, tokens: .break(.open))
 
       for binding in node.bindings {
         before(binding.firstToken, tokens: .open)
@@ -1812,7 +1938,7 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     var closesNeeded: Int = 0
     var closeAfterToken: TokenSyntax? = nil
 
-    if let typeAnnotation = node.typeAnnotation {
+    if let typeAnnotation = node.typeAnnotation, !typeAnnotation.type.is(MissingTypeSyntax.self) {
       after(
         typeAnnotation.colon,
         tokens: .break(.open(kind: .continuation), newlines: .elective(ignoresDiscretionary: true)))
@@ -1822,8 +1948,8 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     if let initializer = node.initializer {
       let expr = initializer.value
 
-      if let (unindentingNode, _) = stackedIndentationBehavior(rhs: expr) {
-        after(initializer.equal, tokens: .break(.open(kind: .continuation)))
+      if let (unindentingNode, _, breakKind) = stackedIndentationBehavior(rhs: expr) {
+        after(initializer.equal, tokens: .break(.open(kind: breakKind)))
         after(unindentingNode.lastToken, tokens: .break(.close(mustBreak: false), size: 0))
       } else {
         after(initializer.equal, tokens: .break(.continue))
@@ -1840,7 +1966,12 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     }
 
     if let accessorOrCodeBlock = node.accessor {
-      arrangeAccessorOrCodeBlock(accessorOrCodeBlock)
+      switch accessorOrCodeBlock {
+      case .accessors(let accessorBlock):
+        arrangeBracesAndContents(of: accessorBlock)
+      case .getter(let codeBlock):
+        arrangeBracesAndContents(of: codeBlock, contentsKeyPath: \.statements)
+      }
     } else if let trailingComma = node.trailingComma {
       // If this is one of multiple comma-delimited bindings, move any pending close breaks to
       // follow the comma so that it doesn't get separated from the tokens before it.
@@ -1856,10 +1987,6 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     return .visitChildren
   }
 
-  override func visit(_ node: AsTypePatternSyntax) -> SyntaxVisitorContinueKind {
-    return .visitChildren
-  }
-
   override func visit(_ node: InheritedTypeSyntax) -> SyntaxVisitorContinueKind {
     after(node.trailingComma, tokens: .break(.same))
     return .visitChildren
@@ -1867,18 +1994,6 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
 
   override func visit(_ node: IsTypePatternSyntax) -> SyntaxVisitorContinueKind {
     after(node.isKeyword, tokens: .space)
-    return .visitChildren
-  }
-
-  override func visit(_ node: ObjcNamePieceSyntax) -> SyntaxVisitorContinueKind {
-    return .visitChildren
-  }
-
-  override func visit(_ node: PoundFileExprSyntax) -> SyntaxVisitorContinueKind {
-    return .visitChildren
-  }
-
-  override func visit(_ node: PoundLineExprSyntax) -> SyntaxVisitorContinueKind {
     return .visitChildren
   }
 
@@ -1908,19 +2023,11 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     return .visitChildren
   }
 
-  override func visit(_ node: ExpressionStmtSyntax) -> SyntaxVisitorContinueKind {
-    return .visitChildren
-  }
-
   override func visit(_ node: IdentifierExprSyntax) -> SyntaxVisitorContinueKind {
     return .visitChildren
   }
 
   override func visit(_ node: NilLiteralExprSyntax) -> SyntaxVisitorContinueKind {
-    return .visitChildren
-  }
-
-  override func visit(_ node: PoundErrorDeclSyntax) -> SyntaxVisitorContinueKind {
     return .visitChildren
   }
 
@@ -1934,20 +2041,12 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     return .visitChildren
   }
 
-  override func visit(_ node: SomeTypeSyntax) -> SyntaxVisitorContinueKind {
-    after(node.someSpecifier, tokens: .space)
+  override func visit(_ node: ConstrainedSugarTypeSyntax) -> SyntaxVisitorContinueKind {
+    after(node.someOrAnySpecifier, tokens: .space)
     return .visitChildren
   }
 
   override func visit(_ node: CompositionTypeSyntax) -> SyntaxVisitorContinueKind {
-    return .visitChildren
-  }
-
-  override func visit(_ node: DeclarationStmtSyntax) -> SyntaxVisitorContinueKind {
-    return .visitChildren
-  }
-
-  override func visit(_ node: EnumCasePatternSyntax) -> SyntaxVisitorContinueKind {
     return .visitChildren
   }
 
@@ -1966,14 +2065,6 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     } else {
       after(node.lastToken, tokens: .close)
     }
-    return .visitChildren
-  }
-
-  override func visit(_ node: OptionalPatternSyntax) -> SyntaxVisitorContinueKind {
-    return .visitChildren
-  }
-
-  override func visit(_ node: PoundColumnExprSyntax) -> SyntaxVisitorContinueKind {
     return .visitChildren
   }
 
@@ -2000,11 +2091,13 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     return .visitChildren
   }
 
-  override func visit(_ node: PostfixUnaryExprSyntax) -> SyntaxVisitorContinueKind {
-    return .visitChildren
-  }
-
-  override func visit(_ node: PoundWarningDeclSyntax) -> SyntaxVisitorContinueKind {
+  override func visit(_ node: PrimaryAssociatedTypeSyntax) -> SyntaxVisitorContinueKind {
+    before(node.firstToken, tokens: .open)
+    if let trailingComma = node.trailingComma {
+      after(trailingComma, tokens: .close, .break(.same))
+    } else {
+      after(node.lastToken, tokens: .close)
+    }
     return .visitChildren
   }
 
@@ -2013,7 +2106,7 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   }
 
   override func visit(_ node: ValueBindingPatternSyntax) -> SyntaxVisitorContinueKind {
-    after(node.letOrVarKeyword, tokens: .break)
+    after(node.bindingKeyword, tokens: .break)
     return .visitChildren
   }
 
@@ -2032,38 +2125,50 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     return .visitChildren
   }
 
-  override func visit(_ node: PoundFunctionExprSyntax) -> SyntaxVisitorContinueKind {
-    return .visitChildren
-  }
-
   override func visit(_ node: StringLiteralExprSyntax) -> SyntaxVisitorContinueKind {
     if node.openQuote.tokenKind == .multilineStringQuote {
-      // If it's a multiline string, the last segment of the literal will end with a newline and
-      // zero or more whitespace that indicates the amount of whitespace stripped from each line of
-      // the string literal.
-      if let lastSegment = node.segments.last?.as(StringSegmentSyntax.self),
-        let lastLine
-          = lastSegment.content.text.split(separator: "\n", omittingEmptySubsequences: false).last
-      {
-        let prefixCount = lastLine.count
-
-        // Segments may be `StringSegmentSyntax` or `ExpressionSegmentSyntax`; for the purposes of
-        // newline handling and whitespace stripping, we only need to handle the former.
-        for segmentSyntax in node.segments {
-          guard let segment = segmentSyntax.as(StringSegmentSyntax.self) else {
-            continue
-          }
-          // Register the content tokens of the segments and the amount of leading whitespace to
-          // strip; this will be retrieved when we visit the token.
-          pendingMultilineStringSegmentPrefixLengths[segment.content] = prefixCount
-        }
-      }
+      // Looks up the correct break kind based on prior context.
+      let breakKind = pendingMultilineStringBreakKinds[node, default: .same]
+      after(node.openQuote, tokens: .break(breakKind, size: 0, newlines: .hard(count: 1)))
+      before(node.closeQuote, tokens: .break(breakKind, newlines: .hard(count: 1)))
     }
     return .visitChildren
   }
 
   override func visit(_ node: StringSegmentSyntax) -> SyntaxVisitorContinueKind {
-    return .visitChildren
+    // Looks up the correct break kind based on prior context.
+    func breakKind() -> BreakKind {
+      if let stringLiteralSegments = node.parent?.as(StringLiteralSegmentsSyntax.self),
+        let stringLiteralExpr = stringLiteralSegments.parent?.as(StringLiteralExprSyntax.self)
+      {
+        return pendingMultilineStringBreakKinds[stringLiteralExpr, default: .same]
+      } else {
+        return .same
+      }
+    }
+
+    let segmentText = node.content.text
+    if segmentText.hasSuffix("\n") {
+      // If this is a multiline string segment, it will end in a newline. Remove the newline and
+      // append the rest of the string, followed by a break if it's not the last line before the
+      // closing quotes. (The `StringLiteralExpr` above does the closing break.)
+      let remainder = node.content.text.dropLast()
+      if !remainder.isEmpty {
+        appendToken(.syntax(String(remainder)))
+      }
+      appendToken(.break(breakKind(), newlines: .hard(count: 1)))
+    } else {
+      appendToken(.syntax(segmentText))
+    }
+
+    if node.trailingTrivia?.containsBackslashes == true {
+      // Segments with trailing backslashes won't end with a literal newline; the backslash is
+      // considered trivia. To preserve the original text and wrapping, we need to manually render
+      // the backslash and a break into the token stream.
+      appendToken(.syntax("\\"))
+      appendToken(.break(breakKind(), newlines: .hard(count: 1)))
+    }
+    return .skipChildren
   }
 
   override func visit(_ node: AssociatedtypeDeclSyntax) -> SyntaxVisitorContinueKind {
@@ -2082,11 +2187,12 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     return .visitChildren
   }
 
-  override func visit(_ node: ElseIfContinuationSyntax) -> SyntaxVisitorContinueKind {
-    return .visitChildren
-  }
-
   override func visit(_ node: GenericWhereClauseSyntax) -> SyntaxVisitorContinueKind {
+    guard node.whereKeyword != node.lastToken else {
+      verbatimToken(Syntax(node))
+      return .skipChildren
+    }
+
     after(node.whereKeyword, tokens: .break(.open))
     after(node.lastToken, tokens: .break(.close, size: 0))
 
@@ -2097,14 +2203,6 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   }
 
   override func visit(_ node: IntegerLiteralExprSyntax) -> SyntaxVisitorContinueKind {
-    return .visitChildren
-  }
-
-  override func visit(_ node: PoundDsohandleExprSyntax) -> SyntaxVisitorContinueKind {
-    return .visitChildren
-  }
-
-  override func visit(_ node: PrefixOperatorExprSyntax) -> SyntaxVisitorContinueKind {
     return .visitChildren
   }
 
@@ -2165,10 +2263,6 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     return .visitChildren
   }
 
-  override func visit(_ node: SymbolicReferenceExprSyntax) -> SyntaxVisitorContinueKind {
-    return .visitChildren
-  }
-
   override func visit(_ node: TypeInheritanceClauseSyntax) -> SyntaxVisitorContinueKind {
     // Normally, the open-break is placed before the open token. In this case, it's intentionally
     // ordered differently so that the inheritance list can start on the current line and only
@@ -2196,7 +2290,7 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   }
 
   override func visit(_ node: OptionalBindingConditionSyntax) -> SyntaxVisitorContinueKind {
-    after(node.letOrVarKeyword, tokens: .break)
+    after(node.bindingKeyword, tokens: .break)
 
     if let typeAnnotation = node.typeAnnotation {
       after(
@@ -2273,39 +2367,9 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     return .visitChildren
   }
 
-  // MARK: - Nodes representing unknown or malformed syntax
+  // MARK: - Nodes representing unexpected or malformed syntax
 
-  override func visit(_ node: UnknownDeclSyntax) -> SyntaxVisitorContinueKind {
-    verbatimToken(Syntax(node))
-    return .skipChildren
-  }
-
-  override func visit(_ node: UnknownExprSyntax) -> SyntaxVisitorContinueKind {
-    verbatimToken(Syntax(node))
-    return .skipChildren
-  }
-
-  override func visit(_ node: UnknownPatternSyntax) -> SyntaxVisitorContinueKind {
-    verbatimToken(Syntax(node))
-    return .skipChildren
-  }
-
-  override func visit(_ node: UnknownStmtSyntax) -> SyntaxVisitorContinueKind {
-    verbatimToken(Syntax(node))
-    return .skipChildren
-  }
-
-  override func visit(_ node: UnknownSyntax) -> SyntaxVisitorContinueKind {
-    verbatimToken(Syntax(node))
-    return .skipChildren
-  }
-
-  override func visit(_ node: UnknownTypeSyntax) -> SyntaxVisitorContinueKind {
-    verbatimToken(Syntax(node))
-    return .skipChildren
-  }
-
-  override func visit(_ node: NonEmptyTokenListSyntax) -> SyntaxVisitorContinueKind {
+  override func visit(_ node: UnexpectedNodesSyntax) -> SyntaxVisitorContinueKind {
     verbatimToken(Syntax(node))
     return .skipChildren
   }
@@ -2322,11 +2386,9 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     extractLeadingTrivia(token)
     closeScopeTokens.forEach(appendToken)
 
-    if let pendingSegmentIndex = pendingMultilineStringSegmentPrefixLengths.index(forKey: token) {
-      appendMultilineStringSegments(at: pendingSegmentIndex)
-    } else if !ignoredTokens.contains(token) {
+    if !ignoredTokens.contains(token) {
       // Otherwise, it's just a regular token, so add the text as-is.
-      appendToken(.syntax(token.text))
+      appendToken(.syntax(token.presence == .present ? token.text : ""))
     }
 
     appendTrailingTrivia(token)
@@ -2334,48 +2396,6 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
 
     // It doesn't matter what we return here, tokens do not have children.
     return .skipChildren
-  }
-
-  /// Appends the contents of the pending multiline string segment at the given index in the
-  /// registration dictionary (removing it from that dictionary) to the token stream, splitting it
-  /// into lines along with required line breaks and stripping the leading whitespace.
-  private func appendMultilineStringSegments(at index: Dictionary<TokenSyntax, Int>.Index) {
-    let (token, prefixCount) = pendingMultilineStringSegmentPrefixLengths[index]
-    pendingMultilineStringSegmentPrefixLengths.remove(at: index)
-
-    let lines = token.text.split(separator: "\n", omittingEmptySubsequences: false)
-
-    // The first "line" is a special case. If it is non-empty, then it is a piece of text that
-    // immediately followed an interpolation segment on the same line of the string, like the
-    // " baz" in "foo bar \(x + y) baz". If that is the case, we need to insert that text before
-    // anything else.
-    let firstLine = lines.first!
-    if !firstLine.isEmpty {
-      appendToken(.syntax(String(firstLine)))
-    }
-
-    // Add the remaining lines of the segment, preceding each with a newline and stripping the
-    // leading whitespace so that the pretty-printer can re-indent the string according to the
-    // standard rules that it would apply.
-    for line in lines.dropFirst() as ArraySlice {
-      appendNewlines(.hard)
-
-      // Verify that the characters to be stripped are all spaces. If they are not, the string
-      // is not valid (no line should contain less leading whitespace than the line with the
-      // closing quotes), but the parser still allows this and it's flagged as an error later during
-      // compilation, so we don't want to destroy the user's text in that case.
-      let stringToAppend: Substring
-      if (line.prefix(prefixCount).allSatisfy { $0 == " " }) {
-        stringToAppend = line.dropFirst(prefixCount)
-      } else {
-        // Only strip as many spaces as we have. This will force the misaligned line to line up with
-        // the others; let's assume that's what the user wanted anyway.
-        stringToAppend = line.drop { $0 == " " }
-      }
-      if !stringToAppend.isEmpty {
-        appendToken(.syntax(String(stringToAppend)))
-      }
-    }
   }
 
   /// Appends the before-tokens of the given syntax token to the token stream.
@@ -2400,16 +2420,24 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   /// trivia represents a malformed input (as opposed to garbage text in leading trivia, which has
   /// some legitimate uses), this is a reasonable compromise to keep the garbage text roughly in the
   /// same place but still let surrounding formatting occur somewhat as expected.
-  private func appendTrailingTrivia(_ token: TokenSyntax) {
+  private func appendTrailingTrivia(_ token: TokenSyntax, forced: Bool = false) {
     let trailingTrivia = Array(token.trailingTrivia)
-    guard let lastGarbageIndex = trailingTrivia.lastIndex(where: { $0.isGarbageText }) else {
-      return
+    let lastIndex: Array<TriviaPiece>.Index
+    if forced {
+      lastIndex = trailingTrivia.index(before: trailingTrivia.endIndex)
+    } else {
+      guard
+        let lastUnexpectedIndex = trailingTrivia.lastIndex(where: { $0.isUnexpectedText })
+      else {
+        return
+      }
+      lastIndex = lastUnexpectedIndex
     }
 
     var verbatimText = ""
-    for piece in trailingTrivia[...lastGarbageIndex] {
+    for piece in trailingTrivia[...lastIndex] {
       switch piece {
-      case .garbageText, .spaces, .tabs, .formfeeds, .verticalTabs:
+      case .shebang, .unexpectedText, .spaces, .tabs, .formfeeds, .verticalTabs:
         piece.write(to: &verbatimText)
       default:
         // The implementation of the lexer today ensures that newlines, carriage returns, and
@@ -2472,11 +2500,18 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   // MARK: - Various other helper methods
 
   /// Applies formatting tokens around and between the attributes in an attribute list.
-  private func arrangeAttributeList(_ attributes: AttributeListSyntax?) {
+  private func arrangeAttributeList(
+    _ attributes: AttributeListSyntax?,
+    suppressFinalBreak: Bool = false
+  ) {
     if let attributes = attributes {
       before(attributes.firstToken, tokens: .open)
       insertTokens(.break(.same), betweenElementsOf: attributes)
-      after(attributes.lastToken, tokens: .close, .break(.same))
+      var afterAttributeTokens = [Token.close]
+      if !suppressFinalBreak {
+        afterAttributeTokens.append(.break(.same))
+      }
+      after(attributes.lastToken, tokens: afterAttributeTokens)
     }
   }
 
@@ -2773,7 +2808,7 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   }
 
   private func extractLeadingTrivia(_ token: TokenSyntax) {
-    var isStartOfFile = token.previousToken == nil
+    var isStartOfFile = token.previousToken(viewMode: .all) == nil
     let trivia = token.leadingTrivia
 
     // If we're at the end of the file, determine at which index to stop checking trivia pieces to
@@ -2853,7 +2888,7 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
           }
         }
 
-      case .garbageText(let text):
+      case .shebang(let text), .unexpectedText(let text):
         // Garbage text in leading trivia might be something meaningful that would be disruptive to
         // throw away when formatting the file, like a hashbang line or Unicode byte-order marker at
         // the beginning of a file, or source control conflict markers. Keep it as verbatim text so
@@ -3057,7 +3092,7 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     }
   }
 
-  /// Adds a grouping around certain subexpressions during `SequenceExpr` visitation.
+  /// Adds a grouping around certain subexpressions during `InfixOperatorExpr` visitation.
   ///
   /// Adding groups around these expressions allows them to prefer breaking onto a newline before
   /// the expression, keeping the entire expression together when possible, before breaking inside
@@ -3087,13 +3122,13 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   }
 
   /// Returns whether the given expression consists of multiple subexpressions. Certain expressions
-  /// that are known to wrap an expressions, e.g. try expressions, are handled by checking the
+  /// that are known to wrap an expression, e.g. try expressions, are handled by checking the
   /// expression that they contain.
   private func isCompoundExpression(_ expr: ExprSyntax) -> Bool {
     switch Syntax(expr).as(SyntaxEnum.self) {
-    case .sequenceExpr(let sequenceExpr):
-      return sequenceExpr.elements.count > 1
-    case .ternaryExpr:
+    case .awaitExpr(let awaitExpr):
+      return isCompoundExpression(awaitExpr.expression)
+    case .infixOperatorExpr, .ternaryExpr, .isExpr, .asExpr:
       return true
     case .tryExpr(let tryExpr):
       return isCompoundExpression(tryExpr.expression)
@@ -3105,7 +3140,7 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   }
 
   /// Returns whether the given operator behaves as an assignment, to assign a right-hand-side to a
-  /// left-hand-side in a SequenceExpr.
+  /// left-hand-side in a `InfixOperatorExpr`.
   ///
   /// Assignment is defined as either being an assignment operator (i.e. `=`) or any operator that
   /// uses "assignment" precedence.
@@ -3113,10 +3148,9 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     if operatorExpr.is(AssignmentExprSyntax.self) {
       return true
     }
-    if let binaryOperator = operatorExpr.as(BinaryOperatorExprSyntax.self) {
-      let operatorText = binaryOperator.operatorToken.text
-      if let precedence = operatorContext.infixOperator(named: operatorText)?.precedenceGroup,
-        precedence === operatorContext.precedenceGroup(named: .assignment)
+    if let binOpExpr = operatorExpr.as(BinaryOperatorExprSyntax.self) {
+      if let binOp = operatorTable.infixOperator(named: binOpExpr.operatorToken.text),
+        let precedenceGroup = binOp.precedenceGroup, precedenceGroup == "AssignmentPrecedence"
       {
         return true
       }
@@ -3135,10 +3169,30 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     switch Syntax(expr).as(SyntaxEnum.self) {
     case .tupleExpr(let tupleExpr) where tupleExpr.elementList.count == 1:
       return tupleExpr
-    case .sequenceExpr(let sequenceExpr):
-      return parenthesizedLeftmostExpr(of: sequenceExpr.elements.first!)
+    case .infixOperatorExpr(let infixOperatorExpr):
+      return parenthesizedLeftmostExpr(of: infixOperatorExpr.leftOperand)
     case .ternaryExpr(let ternaryExpr):
       return parenthesizedLeftmostExpr(of: ternaryExpr.conditionExpression)
+    default:
+      return nil
+    }
+  }
+
+  /// Walks the expression and returns the leftmost multiline string literal (which might be the
+  /// expression itself) if the leftmost child is a multiline string literal.
+  ///
+  /// - Parameter expr: The expression whose leftmost multiline string literal should be returned.
+  /// - Returns: The leftmost multiline string literal, or nil if the leftmost subexpression was
+  ///   not a multiline string literal.
+  private func leftmostMultilineStringLiteral(of expr: ExprSyntax) -> StringLiteralExprSyntax? {
+    switch Syntax(expr).as(SyntaxEnum.self) {
+    case .stringLiteralExpr(let stringLiteralExpr)
+      where stringLiteralExpr.openQuote.tokenKind == .multilineStringQuote:
+      return stringLiteralExpr
+    case .infixOperatorExpr(let infixOperatorExpr):
+      return leftmostMultilineStringLiteral(of: infixOperatorExpr.leftOperand)
+    case .ternaryExpr(let ternaryExpr):
+      return leftmostMultilineStringLiteral(of: ternaryExpr.conditionExpression)
     default:
       return nil
     }
@@ -3148,12 +3202,12 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   /// alongside the last token of the given node. Any tokens between `node.lastToken` and the
   /// returned node's `lastToken` are delimiter tokens that shouldn't be preceded by a break.
   private func outermostEnclosingNode(from node: Syntax) -> Syntax? {
-    guard let afterToken = node.lastToken?.nextToken, closingDelimiterTokens.contains(afterToken)
+    guard let afterToken = node.lastToken?.nextToken(viewMode: .all), closingDelimiterTokens.contains(afterToken)
     else {
       return nil
     }
     var parenthesizedExpr = afterToken.parent
-    while let nextToken = parenthesizedExpr?.lastToken?.nextToken,
+    while let nextToken = parenthesizedExpr?.lastToken?.nextToken(viewMode: .all),
       closingDelimiterTokens.contains(nextToken),
       let nextExpr = nextToken.parent
     {
@@ -3173,7 +3227,7 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   private func stackedIndentationBehavior(
     after operatorExpr: ExprSyntax? = nil,
     rhs: ExprSyntax
-  ) -> (unindentingNode: Syntax, shouldReset: Bool)? {
+  ) -> (unindentingNode: Syntax, shouldReset: Bool, breakKind: OpenBreakKind)? {
     // Check for logical operators first, and if it's that kind of operator, stack indentation
     // around the entire right-hand-side. We have to do this check before checking the RHS for
     // parentheses because if the user writes something like `... && (foo) > bar || ...`, we don't
@@ -3182,19 +3236,20 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     //
     // We also want to reset after undoing the stacked indentation so that we have a visual
     // indication that the subexpression has ended.
-    if let binaryOperator = operatorExpr?.as(BinaryOperatorExprSyntax.self) {
-      let operatorText = binaryOperator.operatorToken.text
-      if let precedence = operatorContext.infixOperator(named: operatorText)?.precedenceGroup,
-        precedence === operatorContext.precedenceGroup(named: .logicalConjunction)
-          || precedence === operatorContext.precedenceGroup(named: .logicalDisjunction)
+    if let binOpExpr = operatorExpr?.as(BinaryOperatorExprSyntax.self) {
+      if let binOp = operatorTable.infixOperator(named: binOpExpr.operatorToken.text),
+        let precedenceGroup = binOp.precedenceGroup,
+        precedenceGroup == "LogicalConjunctionPrecedence"
+          || precedenceGroup == "LogicalDisjunctionPrecedence"
       {
         // When `rhs` side is the last sequence in an enclosing parenthesized expression, absorb the
         // paren into the right hand side by unindenting after the final closing paren. This glues
         // the paren to the last token of `rhs`.
         if let unindentingParenExpr = outermostEnclosingNode(from: Syntax(rhs)) {
-          return (unindentingNode: unindentingParenExpr, shouldReset: true)
+          return (
+            unindentingNode: unindentingParenExpr, shouldReset: true, breakKind: .continuation)
         }
-        return (unindentingNode: Syntax(rhs), shouldReset: true)
+        return (unindentingNode: Syntax(rhs), shouldReset: true, breakKind: .continuation)
       }
     }
 
@@ -3203,7 +3258,9 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     if let ternaryExpr = rhs.as(TernaryExprSyntax.self) {
       // We don't try to absorb any parens in this case, because the condition of a ternary cannot
       // be grouped with any exprs outside of the condition.
-      return (unindentingNode: Syntax(ternaryExpr.conditionExpression), shouldReset: false)
+      return (
+        unindentingNode: Syntax(ternaryExpr.conditionExpression), shouldReset: false,
+        breakKind: .continuation)
     }
 
     // If the right-hand-side of the operator is or starts with a parenthesized expression, stack
@@ -3214,16 +3271,34 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
       // paren into the right hand side by unindenting after the final closing paren. This glues the
       // paren to the last token of `rhs`.
       if let unindentingParenExpr = outermostEnclosingNode(from: Syntax(rhs)) {
-        return (unindentingNode: unindentingParenExpr, shouldReset: true)
+        return (unindentingNode: unindentingParenExpr, shouldReset: true, breakKind: .continuation)
       }
-      return (unindentingNode: Syntax(parenthesizedExpr), shouldReset: false)
+
+      if let innerExpr = parenthesizedExpr.elementList.first?.expression,
+        let stringLiteralExpr = innerExpr.as(StringLiteralExprSyntax.self),
+        stringLiteralExpr.openQuote.tokenKind == .multilineStringQuote
+      {
+        pendingMultilineStringBreakKinds[stringLiteralExpr] = .continue
+        return nil
+      }
+
+      return (
+        unindentingNode: Syntax(parenthesizedExpr), shouldReset: false, breakKind: .continuation)
+    }
+
+    // If the expression is a multiline string that is unparenthesized, create a block-based
+    // indentation scope and have the segments aligned inside it.
+    if let stringLiteralExpr = leftmostMultilineStringLiteral(of: rhs) {
+      pendingMultilineStringBreakKinds[stringLiteralExpr] = .same
+      return (unindentingNode: Syntax(stringLiteralExpr), shouldReset: false, breakKind: .block)
     }
 
     // Otherwise, don't stack--use regular continuation breaks instead.
     return nil
   }
 
-  /// Returns a value indicating whether whitespace should be required around the given operator.
+  /// Returns a value indicating whether whitespace should be required around the given operator,
+  /// for the given configuration.
   ///
   /// If spaces are not required (for example, range operators), then the formatter will also forbid
   /// breaks around the operator. This is to prevent situations where a break could occur before an
@@ -3235,18 +3310,19 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     // to ignore that and apply our own rules.
     if let binaryOperator = operatorExpr.as(BinaryOperatorExprSyntax.self) {
       let token = binaryOperator.operatorToken
-      if let precedence = operatorContext.infixOperator(named: token.text)?.precedenceGroup,
-        precedence === operatorContext.precedenceGroup(named: .rangeFormation)
+      if !config.spacesAroundRangeFormationOperators,
+         let binOp = operatorTable.infixOperator(named: token.text),
+         let precedenceGroup = binOp.precedenceGroup, precedenceGroup == "RangeFormationPrecedence"
       {
         // We want to omit whitespace around range formation operators if possible. We can't do this
         // if the token is either preceded by a postfix operator, followed by a prefix operator, or
         // followed by a dot (for example, in an implicit member reference)---removing the spaces in
         // those situations would cause the parser to greedily treat the combined sequence of
         // operator characters as a single operator.
-        if case .postfixOperator? = token.previousToken?.tokenKind { return true }
+        if case .postfixOperator? = token.previousToken(viewMode: .all)?.tokenKind { return true }
 
-        switch token.nextToken?.tokenKind {
-        case .prefixOperator?, .prefixPeriod?: return true
+        switch token.nextToken(viewMode: .all)?.tokenKind {
+        case .prefixOperator?, .period?: return true
         default: return false
         }
       }
@@ -3277,7 +3353,7 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
     // The leading trivia of the next token, after the ignored node, may contain content that
     // belongs with the ignored node. The trivia extraction that is performed for `lastToken` later
     // excludes that content so it needs to be extracted and added to the token stream here.
-    if let next = node.lastToken?.nextToken, let trivia = next.leadingTrivia.first {
+    if let next = node.lastToken?.nextToken(viewMode: .all), let trivia = next.leadingTrivia.first {
       switch trivia {
       case .lineComment, .blockComment:
         trivia.write(to: &nodeText)
@@ -3355,7 +3431,11 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
 
       if let calledMemberAccessExpr = calledExpression.as(MemberAccessExprSyntax.self) {
         if calledMemberAccessExpr.base != nil {
-          before(calledMemberAccessExpr.dot, tokens: [.break(.contextual, size: 0)])
+          if isNestedInPostfixIfConfig(node: Syntax(calledMemberAccessExpr)) {
+            before(calledMemberAccessExpr.dot, tokens: [.break(.same, size: 0)])
+          } else {
+            before(calledMemberAccessExpr.dot, tokens: [.break(.contextual, size: 0)])
+          }
         }
         before(calledMemberAccessExpr.dot, tokens: beforeTokens)
         after(expr.lastToken, tokens: afterTokens)
@@ -3380,34 +3460,26 @@ fileprivate final class TokenStreamCreator: SyntaxVisitor {
   }
 }
 
-extension Syntax {
-  /// Creates a pretty-printable token stream for the provided Syntax node.
-  func makeTokenStream(configuration: Configuration, operatorContext: OperatorContext) -> [Token] {
-    // First, fold the sequence expressions in the tree before passing it along to the token stream,
-    // because we don't want to modify the tree during token stream creation.
-    let folded = SequenceExprFoldingRewriter(operatorContext: operatorContext).visit(self)
-    let commentsMoved = CommentMovingRewriter().visit(folded)
-    return TokenStreamCreator(
-      configuration: configuration, operatorContext: operatorContext)
-      .makeStream(from: commentsMoved)
-  }
+private func isNestedInPostfixIfConfig(node: Syntax) -> Bool {
+    var this: Syntax? = node
+
+    while this?.parent != nil {
+      if this?.parent?.is(PostfixIfConfigExprSyntax.self) == true {
+        return true
+      }
+
+      this = this?.parent
+    }
+
+    return false
 }
 
-/// Rewrites a syntax tree by folding any sequence expressions contained in it.
-class SequenceExprFoldingRewriter: SyntaxRewriter {
-  private let operatorContext: OperatorContext
-
-  init(operatorContext: OperatorContext) {
-    self.operatorContext = operatorContext
-  }
-
-  override func visit(_ node: SequenceExprSyntax) -> ExprSyntax {
-    let rewrittenBySuper = super.visit(node)
-    if let sequence = rewrittenBySuper.as(SequenceExprSyntax.self) {
-      return sequence.folded(context: operatorContext)
-    } else {
-      return rewrittenBySuper
-    }
+extension Syntax {
+  /// Creates a pretty-printable token stream for the provided Syntax node.
+  func makeTokenStream(configuration: Configuration, operatorTable: OperatorTable) -> [Token] {
+    let commentsMoved = CommentMovingRewriter().visit(self)
+    return TokenStreamCreator(configuration: configuration, operatorTable: operatorTable)
+      .makeStream(from: commentsMoved)
   }
 }
 
@@ -3420,46 +3492,44 @@ class CommentMovingRewriter: SyntaxRewriter {
   /// Map of tokens to alternate trivia to use as the token's leading trivia.
   var rewriteTokenTriviaMap: [TokenSyntax: Trivia] = [:]
 
-  override func visit(_ node: SourceFileSyntax) -> Syntax {
+  override func visit(_ node: SourceFileSyntax) -> SourceFileSyntax {
     if shouldFormatterIgnore(file: node) {
-      return Syntax(node)
+      return node
     }
     return super.visit(node)
   }
 
-  override func visit(_ node: CodeBlockItemSyntax) -> Syntax {
+  override func visit(_ node: CodeBlockItemSyntax) -> CodeBlockItemSyntax {
     if shouldFormatterIgnore(node: Syntax(node)) {
-      return Syntax(node)
+      return node
     }
     return super.visit(node)
   }
 
-  override func visit(_ node: MemberDeclListItemSyntax) -> Syntax {
+  override func visit(_ node: MemberDeclListItemSyntax) -> MemberDeclListItemSyntax {
     if shouldFormatterIgnore(node: Syntax(node)) {
-      return Syntax(node)
+      return node
     }
     return super.visit(node)
   }
 
-  override func visit(_ token: TokenSyntax) -> Syntax {
+  override func visit(_ token: TokenSyntax) -> TokenSyntax {
     if let rewrittenTrivia = rewriteTokenTriviaMap[token] {
-      return Syntax(token.withLeadingTrivia(rewrittenTrivia))
+      return token.with(\.leadingTrivia, rewrittenTrivia)
     }
-    return Syntax(token)
+    return token
   }
 
-  override func visit(_ node: SequenceExprSyntax) -> ExprSyntax {
-    for element in node.elements {
-      if let binaryOperatorExpr = element.as(BinaryOperatorExprSyntax.self),
-        let followingToken = binaryOperatorExpr.operatorToken.nextToken,
-        followingToken.leadingTrivia.hasLineComment
-      {
-        // Rewrite the trivia so that the comment is in the operator token's leading trivia.
-        let (remainingTrivia, extractedTrivia) = extractLineCommentTrivia(from: followingToken)
-        let combinedTrivia = binaryOperatorExpr.operatorToken.leadingTrivia + extractedTrivia
-        rewriteTokenTriviaMap[binaryOperatorExpr.operatorToken] = combinedTrivia
-        rewriteTokenTriviaMap[followingToken] = remainingTrivia
-      }
+  override func visit(_ node: InfixOperatorExprSyntax) -> ExprSyntax {
+    if let binaryOperatorExpr = node.operatorOperand.as(BinaryOperatorExprSyntax.self),
+      let followingToken = binaryOperatorExpr.operatorToken.nextToken(viewMode: .all),
+      followingToken.leadingTrivia.hasLineComment
+    {
+      // Rewrite the trivia so that the comment is in the operator token's leading trivia.
+      let (remainingTrivia, extractedTrivia) = extractLineCommentTrivia(from: followingToken)
+      let combinedTrivia = binaryOperatorExpr.operatorToken.leadingTrivia + extractedTrivia
+      rewriteTokenTriviaMap[binaryOperatorExpr.operatorToken] = combinedTrivia
+      rewriteTokenTriviaMap[followingToken] = remainingTrivia
     }
     return super.visit(node)
   }
@@ -3505,10 +3575,10 @@ class CommentMovingRewriter: SyntaxRewriter {
 }
 
 extension TriviaPiece {
-  /// True if the trivia piece is garbage text.
-  fileprivate var isGarbageText: Bool {
+  /// True if the trivia piece is unexpected text.
+  fileprivate var isUnexpectedText: Bool {
     switch self {
-    case .garbageText: return true
+    case .unexpectedText: return true
     default: return false
     }
   }

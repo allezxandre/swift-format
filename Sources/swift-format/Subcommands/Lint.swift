@@ -21,11 +21,20 @@ extension SwiftFormatCommand {
 
     @OptionGroup()
     var lintOptions: LintFormatOptions
+    
+    @Flag(
+      name: .shortAndLong,
+      help: "Fail on warnings."
+    )
+    var strict: Bool = false
 
     func run() throws {
       let frontend = LintFrontend(lintFormatOptions: lintOptions)
       frontend.run()
-      if frontend.errorsWereEmitted { throw ExitCode.failure }
+
+      if frontend.diagnosticsEngine.hasErrors || strict && frontend.diagnosticsEngine.hasWarnings {
+        throw ExitCode.failure
+      }
     }
   }
 }

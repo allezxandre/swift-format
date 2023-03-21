@@ -70,13 +70,16 @@ public final class DoNotUseSemicolons: SyntaxFormatRule {
       // If there's a semicolon, diagnose and remove it.
       if let semicolon = item.semicolon {
 
-        // Exception: do not remove the semicolon if it is separating a 'do' statement from a 'while' statement.
-        if Syntax(item).as(CodeBlockItemSyntax.self)?.children.first?.is(DoStmtSyntax.self) == true,
+        // Exception: do not remove the semicolon if it is separating a 'do' statement from a
+        // 'while' statement.
+        if Syntax(item).as(CodeBlockItemSyntax.self)?
+          .children(viewMode: .sourceAccurate).first?.is(DoStmtSyntax.self) == true,
           idx < node.count - 1
         {
-          let nextItem = node.children[node.children.index(after: item.index)]
+          let children = node.children(viewMode: .sourceAccurate)
+          let nextItem = children[children.index(after: item.index)]
           if Syntax(nextItem).as(CodeBlockItemSyntax.self)?
-            .children.first?.is(WhileStmtSyntax.self) == true
+            .children(viewMode: .sourceAccurate).first?.is(WhileStmtSyntax.self) == true
           {
             continue
           }
@@ -84,7 +87,7 @@ public final class DoNotUseSemicolons: SyntaxFormatRule {
 
         // This discards any trailingTrivia from the semicolon. That trivia is at most some spaces,
         // and the pretty printer adds any necessary spaces so it's safe to discard.
-        newItem = newItem.withSemicolon(nil)
+        newItem = newItem.with(\.semicolon, nil)
         if idx < node.count - 1 {
           diagnose(.removeSemicolonAndMove, on: semicolon)
         } else {
@@ -95,18 +98,18 @@ public final class DoNotUseSemicolons: SyntaxFormatRule {
     return nodeCreator(newItems)
   }
 
-  public override func visit(_ node: CodeBlockItemListSyntax) -> Syntax {
-    return Syntax(nodeByRemovingSemicolons(from: node, nodeCreator: SyntaxFactory.makeCodeBlockItemList))
+  public override func visit(_ node: CodeBlockItemListSyntax) -> CodeBlockItemListSyntax {
+    return nodeByRemovingSemicolons(from: node, nodeCreator: CodeBlockItemListSyntax.init)
   }
 
-  public override func visit(_ node: MemberDeclListSyntax) -> Syntax {
-    return Syntax(nodeByRemovingSemicolons(from: node, nodeCreator: SyntaxFactory.makeMemberDeclList))
+  public override func visit(_ node: MemberDeclListSyntax) -> MemberDeclListSyntax {
+    return nodeByRemovingSemicolons(from: node, nodeCreator: MemberDeclListSyntax.init)
   }
 }
 
-extension Diagnostic.Message {
-  public static let removeSemicolon = Diagnostic.Message(.warning, "remove ';'")
+extension Finding.Message {
+  public static let removeSemicolon: Finding.Message = "remove ';'"
 
-  public static let removeSemicolonAndMove = Diagnostic.Message(
-    .warning, "remove ';' and move the next statement to a new line")
+  public static let removeSemicolonAndMove: Finding.Message =
+    "remove ';' and move the next statement to a new line"
 }

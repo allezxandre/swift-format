@@ -1,6 +1,7 @@
 import SwiftFormatTestSupport
 import SwiftFormatWhitespaceLinter
 import SwiftSyntax
+import SwiftParser
 import XCTest
 
 final class WhitespaceLinterPerformanceTests: DiagnosingTestCase {
@@ -55,14 +56,7 @@ final class WhitespaceLinterPerformanceTests: DiagnosingTestCase {
   ///   - input: The user's input text.
   ///   - expected: The formatted text.
   private func performWhitespaceLint(input: String, expected: String) {
-    let sourceFileSyntax: SourceFileSyntax
-    do {
-      sourceFileSyntax = try SyntaxParser.parse(source: input)
-    } catch {
-      XCTFail("Parsing failed with error: \(error)")
-      return
-    }
-
+    let sourceFileSyntax = Parser.parse(source: input)
     let context = makeContext(sourceFileSyntax: sourceFileSyntax)
     let linter = WhitespaceLinter(user: input, formatted: expected, context: context)
     linter.lint()

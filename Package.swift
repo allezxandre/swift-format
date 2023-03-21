@@ -1,4 +1,4 @@
-// swift-tools-version:5.1
+// swift-tools-version:5.6
 //===----------------------------------------------------------------------===//
 //
 // This source file is part of the Swift.org open source project
@@ -11,17 +11,39 @@
 //
 //===----------------------------------------------------------------------===//
 
-import PackageDescription
 import Foundation
+import PackageDescription
 
 let package = Package(
   name: "swift-format",
+  platforms: [
+    .iOS("13.0"),
+    .macOS("10.15")
+  ],
   products: [
-    .executable(name: "swift-format", targets: ["swift-format"]),
-    .library(name: "SwiftFormat", targets: ["SwiftFormat", "SwiftFormatConfiguration"]),
-    .library(name: "SwiftFormatConfiguration", targets: ["SwiftFormatConfiguration"]),
+    .executable(
+      name: "swift-format",
+      targets: ["swift-format"]
+    ),
+    .library(
+      name: "SwiftFormat",
+      targets: ["SwiftFormat", "SwiftFormatConfiguration"]
+    ),
+    .library(
+      name: "SwiftFormatConfiguration",
+      targets: ["SwiftFormatConfiguration"]
+    ),
+    .plugin(
+      name: "FormatPlugin",
+      targets: ["Format Source Code"]
+    ),
+    .plugin(
+      name: "LintPlugin",
+      targets: ["Lint Source Code"]
+    ),
   ],
   dependencies: [
+    // See the "Dependencies" section below.
   ],
   targets: [
     .target(
@@ -32,75 +54,110 @@ let package = Package(
         "SwiftFormatPrettyPrint",
         "SwiftFormatRules",
         "SwiftFormatWhitespaceLinter",
-        "SwiftSyntax",
+        .product(name: "SwiftSyntax", package: "swift-syntax"),
+        .product(name: "SwiftOperators", package: "swift-syntax"),
+        .product(name: "SwiftParser", package: "swift-syntax"),
+        .product(name: "SwiftParserDiagnostics", package: "swift-syntax"),
       ]
     ),
-    .target(name: "SwiftFormatConfiguration"),
-    .target(name: "SwiftFormatCore", dependencies: ["SwiftFormatConfiguration", "SwiftSyntax"]),
+    .target(
+      name: "SwiftFormatConfiguration"
+    ),
+    .target(
+      name: "SwiftFormatCore",
+      dependencies: [
+        "SwiftFormatConfiguration",
+        .product(name: "SwiftOperators", package: "swift-syntax"),
+        .product(name: "SwiftSyntax", package: "swift-syntax"),
+      ]
+    ),
     .target(
       name: "SwiftFormatRules",
       dependencies: ["SwiftFormatCore", "SwiftFormatConfiguration"]
     ),
     .target(
       name: "SwiftFormatPrettyPrint",
-      dependencies: ["SwiftFormatCore", "SwiftFormatConfiguration"]
+      dependencies: [
+        "SwiftFormatCore",
+        "SwiftFormatConfiguration",
+        .product(name: "SwiftOperators", package: "swift-syntax"),
+      ]
     ),
     .target(
       name: "SwiftFormatTestSupport",
-      dependencies: ["SwiftFormatCore", "SwiftFormatConfiguration"]
+      dependencies: [
+        "SwiftFormatCore",
+        "SwiftFormatRules",
+        "SwiftFormatConfiguration",
+        .product(name: "SwiftOperators", package: "swift-syntax"),
+      ]
     ),
     .target(
       name: "SwiftFormatWhitespaceLinter",
       dependencies: [
         "SwiftFormatCore",
-        "SwiftSyntax",
+        .product(name: "SwiftSyntax", package: "swift-syntax"),
       ]
     ),
-    .target(
+    .plugin(
+      name: "Format Source Code",
+      capability: .command(
+        intent: .sourceCodeFormatting(),
+        permissions: [
+          .writeToPackageDirectory(reason: "This command formats the Swift source files")
+        ]
+      ),
+      dependencies: [
+        .target(name: "swift-format")
+      ],
+      path: "Plugins/FormatPlugin"
+    ),
+    .plugin(
+      name: "Lint Source Code",
+      capability: .command(
+        intent: .custom(
+          verb: "lint-source-code",
+          description: "Lint source code for a specified target."
+        )
+      ),
+      dependencies: [
+        .target(name: "swift-format")
+      ],
+      path: "Plugins/LintPlugin"
+    ),
+    .executableTarget(
       name: "generate-pipeline",
       dependencies: [
         "SwiftFormatCore",
         "SwiftFormatRules",
-        "SwiftSyntax",
+        .product(name: "SwiftSyntax", package: "swift-syntax"),
+        .product(name: "SwiftParser", package: "swift-syntax"),
       ]
     ),
-    .target(
+    .executableTarget(
       name: "swift-format",
       dependencies: [
-        "ArgumentParser",
         "SwiftFormat",
         "SwiftFormatConfiguration",
         "SwiftFormatCore",
-        "SwiftSyntax",
+        .product(name: "ArgumentParser", package: "swift-argument-parser"),
+        .product(name: "SwiftSyntax", package: "swift-syntax"),
+        .product(name: "SwiftParser", package: "swift-syntax"),
+        .product(name: "TSCBasic", package: "swift-tools-support-core"),
       ]
     ),
-    .testTarget(
-      name: "SwiftFormatTests",
-      dependencies: [
-        "SwiftFormat",
-      ]
-    ),
+
     .testTarget(
       name: "SwiftFormatConfigurationTests",
       dependencies: ["SwiftFormatConfiguration"]
-    ),
-    .testTarget(
-      name: "SwiftFormatRulesTests",
-      dependencies: [
-        "SwiftFormatConfiguration",
-        "SwiftFormatCore",
-        "SwiftFormatPrettyPrint",
-        "SwiftFormatRules",
-        "SwiftFormatTestSupport",
-        "SwiftSyntax",
-      ]
     ),
     .testTarget(
       name: "SwiftFormatCoreTests",
       dependencies: [
         "SwiftFormatConfiguration",
         "SwiftFormatCore",
-        "SwiftSyntax",
+        .product(name: "SwiftSyntax", package: "swift-syntax"),
+        .product(name: "SwiftParser", package: "swift-syntax"),
       ]
     ),
     .testTarget(
@@ -108,7 +165,8 @@ let package = Package(
       dependencies: [
         "SwiftFormatTestSupport",
         "SwiftFormatWhitespaceLinter",
-        "SwiftSyntax",
+        .product(name: "SwiftSyntax", package: "swift-syntax"),
+        .product(name: "SwiftParser", package: "swift-syntax"),
       ]
     ),
     .testTarget(
@@ -119,7 +177,21 @@ let package = Package(
         "SwiftFormatPrettyPrint",
         "SwiftFormatRules",
         "SwiftFormatTestSupport",
-        "SwiftSyntax",
+        .product(name: "SwiftSyntax", package: "swift-syntax"),
+        .product(name: "SwiftOperators", package: "swift-syntax"),
+        .product(name: "SwiftParser", package: "swift-syntax"),
+      ]
+    ),
+    .testTarget(
+      name: "SwiftFormatRulesTests",
+      dependencies: [
+        "SwiftFormatConfiguration",
+        "SwiftFormatCore",
+        "SwiftFormatPrettyPrint",
+        "SwiftFormatRules",
+        "SwiftFormatTestSupport",
+        .product(name: "SwiftSyntax", package: "swift-syntax"),
+        .product(name: "SwiftParser", package: "swift-syntax"),
       ]
     ),
     .testTarget(
@@ -129,22 +201,37 @@ let package = Package(
         "SwiftFormatCore",
         "SwiftFormatTestSupport",
         "SwiftFormatWhitespaceLinter",
-        "SwiftSyntax",
+        .product(name: "SwiftSyntax", package: "swift-syntax"),
+        .product(name: "SwiftParser", package: "swift-syntax"),
       ]
     ),
   ]
 )
 
+// MARK: Dependencies
 
 if ProcessInfo.processInfo.environment["SWIFTCI_USE_LOCAL_DEPS"] == nil {
   // Building standalone.
   package.dependencies += [
-    .package(url: "https://github.com/apple/swift-syntax", .branch("main")),
-    .package(url: "https://github.com/apple/swift-argument-parser.git", .branch("main")),
+    .package(
+      url: "https://github.com/apple/swift-argument-parser.git",
+      // This should be kept in sync with the same dependency used by
+      // swift-syntax.
+      .upToNextMinor(from: "1.2.2")
+    ),
+    .package(
+      url: "https://github.com/apple/swift-syntax.git",
+      branch: "main"
+    ),
+    .package(
+      url: "https://github.com/apple/swift-tools-support-core.git",
+      exact: Version("0.4.0")
+    ),
   ]
 } else {
   package.dependencies += [
-    .package(path: "../swift-syntax"),
     .package(path: "../swift-argument-parser"),
+    .package(path: "../swift-syntax"),
+    .package(path: "../swift-tools-support-core"),
   ]
 }

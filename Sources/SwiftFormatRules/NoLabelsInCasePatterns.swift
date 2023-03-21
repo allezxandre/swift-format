@@ -23,7 +23,7 @@ import SwiftSyntax
 ///
 /// Format: Redundant labels in case patterns are removed.
 public final class NoLabelsInCasePatterns: SyntaxFormatRule {
-  public override func visit(_ node: SwitchCaseLabelSyntax) -> Syntax {
+  public override func visit(_ node: SwitchCaseLabelSyntax) -> SwitchCaseLabelSyntax {
     var newCaseItems: [CaseItemSyntax] = []
     for item in node.caseItems {
       guard let expPat = item.pattern.as(ExpressionPatternSyntax.self) else {
@@ -50,28 +50,28 @@ public final class NoLabelsInCasePatterns: SyntaxFormatRule {
         }
 
         // Remove label if it's the same as the value identifier
-        let name = valueBinding.valuePattern.withoutTrivia().description
+        let name = valueBinding.valuePattern.with(\.leadingTrivia, []).with(\.trailingTrivia, []).description
         guard name == label.text else {
           newArgs.append(argument)
           continue
         }
         diagnose(.removeRedundantLabel(name: name), on: label)
-        newArgs.append(argument.withLabel(nil).withColon(nil))
+        newArgs.append(argument.with(\.label, nil).with(\.colon, nil))
       }
 
-      let newArgList = SyntaxFactory.makeTupleExprElementList(newArgs)
-      let newFuncCall = funcCall.withArgumentList(newArgList)
-      let newExpPat = expPat.withExpression(ExprSyntax(newFuncCall))
-      let newItem = item.withPattern(PatternSyntax(newExpPat))
+      let newArgList = TupleExprElementListSyntax(newArgs)
+      let newFuncCall = funcCall.with(\.argumentList, newArgList)
+      let newExpPat = expPat.with(\.expression, ExprSyntax(newFuncCall))
+      let newItem = item.with(\.pattern, PatternSyntax(newExpPat))
       newCaseItems.append(newItem)
     }
-    let newCaseItemList = SyntaxFactory.makeCaseItemList(newCaseItems)
-    return Syntax(node.withCaseItems(newCaseItemList))
+    let newCaseItemList = CaseItemListSyntax(newCaseItems)
+    return node.with(\.caseItems, newCaseItemList)
   }
 }
 
-extension Diagnostic.Message {
-  public static func removeRedundantLabel(name: String) -> Diagnostic.Message {
-    return .init(.warning, "remove \(name) label from case argument")
+extension Finding.Message {
+  public static func removeRedundantLabel(name: String) -> Finding.Message {
+    "remove \(name) label from case argument"
   }
 }

@@ -59,8 +59,8 @@ public final class GroupNumericLiterals: SyntaxFormatRule {
     }
 
     newDigits = isNegative ? "-" + newDigits : newDigits
-    let result = node.withDigits(
-      SyntaxFactory.makeIntegerLiteral(
+    let result = node.with(\.digits,
+      TokenSyntax.integerLiteral(
         newDigits,
         leadingTrivia: node.digits.leadingTrivia,
         trailingTrivia: node.digits.trailingTrivia))
@@ -82,9 +82,9 @@ public final class GroupNumericLiterals: SyntaxFormatRule {
   }
 }
 
-extension Diagnostic.Message {
-  public static func groupNumericLiteral(every stride: Int) -> Diagnostic.Message {
+extension Finding.Message {
+  public static func groupNumericLiteral(every stride: Int) -> Finding.Message {
     let ending = stride == 3 ? "rd" : "th"
-    return .init(.warning, "group numeric literal using '_' every \(stride)\(ending) number")
+    return "group numeric literal using '_' every \(stride)\(ending) number"
   }
 }

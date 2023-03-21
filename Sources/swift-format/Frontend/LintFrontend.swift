@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 import Foundation
+import SwiftDiagnostics
 import SwiftFormat
 import SwiftFormatConfiguration
 import SwiftSyntax
@@ -19,37 +20,40 @@ import SwiftSyntax
 class LintFrontend: Frontend {
   override func processFile(_ fileToProcess: FileToProcess) {
     let linter = SwiftLinter(
-      configuration: fileToProcess.configuration, diagnosticEngine: diagnosticEngine)
+      configuration: fileToProcess.configuration, findingConsumer: diagnosticsEngine.consumeFinding)
     linter.debugOptions = debugOptions
 
-    let path = fileToProcess.path
+    let url = fileToProcess.url
     guard let source = fileToProcess.sourceText else {
-      diagnosticEngine.diagnose(
-        Diagnostic.Message(
-          .error, "Unable to read source for linting from \(path)."))
+      diagnosticsEngine.emitError(
+        "Unable to lint \(url.relativePath): file is not readable or does not exist.")
       return
     }
 
     do {
-      let assumingFileURL = URL(fileURLWithPath: path)
-      try linter.lint(source: source, assumingFileURL: assumingFileURL)
+      try linter.lint(
+        source: source,
+        assumingFileURL: url) { (diagnostic, location) in
+          guard !self.lintFormatOptions.ignoreUnparsableFiles else {
+            // No diagnostics should be emitted in this mode.
+            return
+          }
+          self.diagnosticsEngine.consumeParserDiagnostic(diagnostic, location)
+      }
+
     } catch SwiftFormatError.fileNotReadable {
-      diagnosticEngine.diagnose(
-        Diagnostic.Message(
-          .error, "Unable to lint \(path): file is not readable or does not exist."))
+      diagnosticsEngine.emitError(
+        "Unable to lint \(url.relativePath): file is not readable or does not exist.")
       return
-    } catch SwiftFormatError.fileContainsInvalidSyntax(let position) {
+    } catch SwiftFormatError.fileContainsInvalidSyntax {
       guard !lintFormatOptions.ignoreUnparsableFiles else {
         // The caller wants to silently ignore this error.
         return
       }
-      let location = SourceLocationConverter(file: path, source: source).location(for: position)
-      diagnosticEngine.diagnose(
-        Diagnostic.Message(.error, "file contains invalid or unrecognized Swift syntax."),
-        location: location)
+      // Otherwise, relevant diagnostics about the problematic nodes have been emitted.
       return
     } catch {
-      diagnosticEngine.diagnose(Diagnostic.Message(.error, "Unable to lint \(path): \(error)"))
+      diagnosticsEngine.emitError("Unable to lint \(url.relativePath): \(error)")
       return
     }
   }

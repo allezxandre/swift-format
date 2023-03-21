@@ -79,6 +79,9 @@ top-level keys and values:
    true, a line break is forced before the "." of the component and after the component's
    closing delimiter (i.e. right paren, right bracket, right brace, etc.).
 
+*  `spacesAroundRangeFormationOperators` _(boolean)_: Determines whether whitespace should be forced
+   before and after the range formation operators `...` and `..<`.
+
 > TODO: Add support for enabling/disabling specific syntax transformations in
 > the pipeline.
 
@@ -113,6 +116,6 @@ behave when acting upon source code or syntax trees.
 
 The default initializer for `Configuration` creates a value equivalent to the
 default configuration that would be printed by invoking
-`swift-format --mode dump-configuration`. API users can also provide their own
+`swift-format dump-configuration`. API users can also provide their own
 configuration by modifying this value or loading it from another source using
 Swift's `Codable` APIs.

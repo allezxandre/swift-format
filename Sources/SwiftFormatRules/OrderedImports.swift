@@ -25,7 +25,7 @@ import SwiftSyntax
 /// Format: Imports will be reordered and grouped at the top of the file.
 public final class OrderedImports: SyntaxFormatRule {
 
-  public override func visit(_ node: SourceFileSyntax) -> Syntax {
+  public override func visit(_ node: SourceFileSyntax) -> SourceFileSyntax {
     let lines = generateLines(codeBlockItemList: node.statements, context: context)
 
     // Stores the formatted and sorted lines that will be used to reconstruct the list of code block
@@ -131,10 +131,11 @@ public final class OrderedImports: SyntaxFormatRule {
       formatAndAppend(linesSection: lines[lastSliceStartIndex..<lines.endIndex])
     }
 
-    let newNode = node.withStatements(
-      SyntaxFactory.makeCodeBlockItemList(convertToCodeBlockItems(lines: formattedLines))
+    let newNode = node.with(
+      \.statements, 
+      CodeBlockItemListSyntax(convertToCodeBlockItems(lines: formattedLines))
     )
-    return Syntax(newNode)
+    return newNode
   }
 
   /// Raise lint errors if the different import types appear in the wrong order, and if import
@@ -188,7 +189,7 @@ public final class OrderedImports: SyntaxFormatRule {
   }
 
   /// Sort the list of import lines lexicographically by the import path name. Any comments above an
-  /// import lines should be assocaited with it, and move with the line during sorting. We also emit
+  /// import lines should be associated with it, and move with the line during sorting. We also emit
   /// a linter error if an import line is discovered to be out of order.
   private func formatImports(_ imports: [Line]) -> [Line] {
     var linesWithLeadingComments: [(import: Line, comments: [Line])] = []
@@ -280,7 +281,7 @@ fileprivate func joinLines(_ inputLineLists: [Line]...) -> [Line] {
 }
 
 /// This function transforms the statements in a CodeBlockItemListSyntax object into a list of Line
-/// obejcts. Blank lines and standalone comments are represented by their own Line object. Code with
+/// objects. Blank lines and standalone comments are represented by their own Line object. Code with
 /// a trailing comment are represented together in the same Line.
 fileprivate func generateLines(codeBlockItemList: CodeBlockItemListSyntax, context: Context)
   -> [Line]
@@ -324,7 +325,7 @@ fileprivate func generateLines(codeBlockItemList: CodeBlockItemListSyntax, conte
         lines.append(currentLine)
         currentLine = Line()
       }
-      let sortable = context.isRuleEnabled(OrderedImports.ruleName, node: Syntax(block))
+      let sortable = context.isRuleEnabled(OrderedImports.self, node: Syntax(block))
       currentLine.syntaxNode = .importCodeBlock(block, sortable: sortable)
     } else {
       guard let syntaxNode = currentLine.syntaxNode else {
@@ -575,16 +576,14 @@ extension Line: CustomDebugStringConvertible {
   }
 }
 
-extension Diagnostic.Message {
-  public static let placeAtTopOfFile = Diagnostic.Message(
-    .warning, "place imports at the top of the file")
+extension Finding.Message {
+  public static let placeAtTopOfFile: Finding.Message = "place imports at the top of the file"
 
-  public static func groupImports(before: LineType, after: LineType) -> Diagnostic.Message {
-    return Diagnostic.Message(.warning, "place \(before) imports before \(after) imports")
+  public static func groupImports(before: LineType, after: LineType) -> Finding.Message {
+    "place \(before) imports before \(after) imports"
   }
 
-  public static let removeDuplicateImport = Diagnostic.Message(.warning, "remove duplicate import")
+  public static let removeDuplicateImport: Finding.Message = "remove duplicate import"
 
-  public static let sortImports =
-    Diagnostic.Message(.warning, "sort import statements lexicographically")
+  public static let sortImports: Finding.Message = "sort import statements lexicographically"
 }

@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 import Foundation
+import SwiftDiagnostics
 import SwiftFormat
 import SwiftFormatConfiguration
 import SwiftSyntax
@@ -26,38 +27,52 @@ class FormatFrontend: Frontend {
   }
 
   override func processFile(_ fileToProcess: FileToProcess) {
-    // Even though `diagnosticEngine` is defined, it's use is reserved for fatal messages. Pass nil
-    // to the formatter to suppress other messages since they will be fixed or can't be
-    // automatically fixed anyway.
-    let formatter = SwiftFormatter(
-      configuration: fileToProcess.configuration, diagnosticEngine: nil)
+    // In format mode, the diagnostics engine is reserved for fatal messages. Pass nil as the
+    // finding consumer to ignore findings emitted while the syntax tree is processed because they
+    // will be fixed automatically if they can be, or ignored otherwise.
+    let formatter = SwiftFormatter(configuration: fileToProcess.configuration, findingConsumer: nil)
     formatter.debugOptions = debugOptions
 
-    let path = fileToProcess.path
+    let url = fileToProcess.url
     guard let source = fileToProcess.sourceText else {
-      diagnosticEngine.diagnose(
-        Diagnostic.Message(.error, "Unable to read source for formatting from \(path)."))
+      diagnosticsEngine.emitError(
+        "Unable to format \(url.relativePath): file is not readable or does not exist.")
       return
     }
 
-    var stdoutStream = FileHandle.standardOutput
+    let diagnosticHandler: (Diagnostic, SourceLocation) -> () =  { (diagnostic, location) in
+      guard !self.lintFormatOptions.ignoreUnparsableFiles else {
+        // No diagnostics should be emitted in this mode.
+        return
+      }
+      self.diagnosticsEngine.consumeParserDiagnostic(diagnostic, location)
+    }
+    var stdoutStream = FileHandleTextOutputStream(FileHandle.standardOutput)
     do {
-      let assumingFileURL = URL(fileURLWithPath: path)
       if inPlace {
         var buffer = ""
-        try formatter.format(source: source, assumingFileURL: assumingFileURL, to: &buffer)
+        try formatter.format(
+          source: source,
+          assumingFileURL: url,
+          to: &buffer,
+          parsingDiagnosticHandler: diagnosticHandler)
 
-        let bufferData = buffer.data(using: .utf8)!  // Conversion to UTF-8 cannot fail
-        try bufferData.write(to: assumingFileURL, options: .atomic)
+        if buffer != source {
+          let bufferData = buffer.data(using: .utf8)!  // Conversion to UTF-8 cannot fail
+          try bufferData.write(to: url, options: .atomic)
+        }
       } else {
-        try formatter.format(source: source, assumingFileURL: assumingFileURL, to: &stdoutStream)
+        try formatter.format(
+          source: source,
+          assumingFileURL: url,
+          to: &stdoutStream,
+          parsingDiagnosticHandler: diagnosticHandler)
       }
     } catch SwiftFormatError.fileNotReadable {
-      diagnosticEngine.diagnose(
-        Diagnostic.Message(
-          .error, "Unable to format \(path): file is not readable or does not exist."))
+      diagnosticsEngine.emitError(
+        "Unable to format \(url.relativePath): file is not readable or does not exist.")
       return
-    } catch SwiftFormatError.fileContainsInvalidSyntax(let position) {
+    } catch SwiftFormatError.fileContainsInvalidSyntax {
       guard !lintFormatOptions.ignoreUnparsableFiles else {
         guard !inPlace else {
           // For in-place mode, nothing is expected to stdout and the file shouldn't be modified.
@@ -66,13 +81,10 @@ class FormatFrontend: Frontend {
         stdoutStream.write(source)
         return
       }
-      let location = SourceLocationConverter(file: path, source: source).location(for: position)
-      diagnosticEngine.diagnose(
-        Diagnostic.Message(.error, "file contains invalid or unrecognized Swift syntax."),
-        location: location)
+      // Otherwise, relevant diagnostics about the problematic nodes have been emitted.
       return
     } catch {
-      diagnosticEngine.diagnose(Diagnostic.Message(.error, "Unable to format \(path): \(error)"))
+      diagnosticsEngine.emitError("Unable to format \(url.relativePath): \(error)")
     }
   }
 }

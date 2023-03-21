@@ -90,18 +90,18 @@ final class ReturnVoidInsteadOfEmptyTupleTests: LintOrFormatRuleTestCase {
       input:
         """
         let callback: () -> /*foo*/()/*bar*/
-        let callback: (Int ->   /*foo*/   ()   /*bar*/) -> ()
+        let callback: ((Int) ->   /*foo*/   ()   /*bar*/) -> ()
         """,
       expected:
         """
         let callback: () -> /*foo*/Void/*bar*/
-        let callback: (Int ->   /*foo*/   Void   /*bar*/) -> Void
+        let callback: ((Int) ->   /*foo*/   Void   /*bar*/) -> Void
         """,
       checkForUnassertedDiagnostics: true
     )
     XCTAssertDiagnosed(.returnVoid, line: 1, column: 28)
-    XCTAssertDiagnosed(.returnVoid, line: 2, column: 35)
-    XCTAssertDiagnosed(.returnVoid, line: 2, column: 52)
+    XCTAssertDiagnosed(.returnVoid, line: 2, column: 37)
+    XCTAssertDiagnosed(.returnVoid, line: 2, column: 54)
   }
 
   func testEmptyTupleWithInternalCommentsIsDiagnosedButNotReplaced() {
@@ -153,6 +153,7 @@ final class ReturnVoidInsteadOfEmptyTupleTests: LintOrFormatRuleTestCase {
     XCTAssertDiagnosed(.returnVoid, line: 6, column: 21)
     XCTAssertDiagnosed(.returnVoid, line: 7, column: 21)
     XCTAssertDiagnosed(.returnVoid, line: 10, column: 21)
+    XCTAssertDiagnosed(.returnVoid, line: 13, column: 21)
     XCTAssertDiagnosed(.returnVoid, line: 15, column: 22)
     XCTAssertDiagnosed(.returnVoid, line: 15, column: 29)
     XCTAssertDiagnosed(.returnVoid, line: 16, column: 44)

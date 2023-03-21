@@ -14,6 +14,7 @@ import Foundation
 import SwiftFormat
 import SwiftFormatConfiguration
 import SwiftSyntax
+import SwiftParser
 
 class Frontend {
   /// Represents a file to be processed by the frontend and any file-specific options associated
@@ -22,7 +23,7 @@ class Frontend {
     /// An open file handle to the source code of the file.
     private let fileHandle: FileHandle
 
-    /// The path to the source file being processed.
+    /// A file URL representing the path to the source file being processed.
     ///
     /// It is the responsibility of the specific frontend to make guarantees about the validity of
     /// this path. For example, the formatting frontend ensures that it is a path to an existing
@@ -30,7 +31,7 @@ class Frontend {
     /// situations, it may correspond to a different file than the underlying file handle (if
     /// standard input is used with the `--assume-filename` flag), or it may not be a valid path at
     /// all (the string `"<stdin>"`).
-    let path: String
+    let url: URL
 
     /// The configuration that should applied for this file.
     let configuration: Configuration
@@ -45,20 +46,18 @@ class Frontend {
       return String(data: sourceData, encoding: .utf8)
     }()
 
-    init(fileHandle: FileHandle, path: String, configuration: Configuration) {
+    init(fileHandle: FileHandle, url: URL, configuration: Configuration) {
       self.fileHandle = fileHandle
-      self.path = path
+      self.url = url
       self.configuration = configuration
     }
   }
 
+  /// Prints diagnostics to standard error, optionally with color.
+  final let diagnosticPrinter: StderrDiagnosticPrinter
+
   /// The diagnostic engine to which warnings and errors will be emitted.
-  final let diagnosticEngine: DiagnosticEngine = {
-    let engine = DiagnosticEngine()
-    let consumer = PrintingDiagnosticConsumer()
-    engine.addConsumer(consumer)
-    return engine
-  }()
+  final let diagnosticsEngine: UnifiedDiagnosticsEngine
 
   /// Options that apply during formatting or linting.
   final let lintFormatOptions: LintFormatOptions
@@ -75,24 +74,26 @@ class Frontend {
     ]
   }
 
-  /// Indicates whether any errors were emitted during execution.
-  final var errorsWereEmitted: Bool { diagnosticEngine.hasErrors }
-
   /// Creates a new frontend with the given options.
   ///
   /// - Parameter lintFormatOptions: Options that apply during formatting or linting.
   init(lintFormatOptions: LintFormatOptions) {
     self.lintFormatOptions = lintFormatOptions
+
+    self.diagnosticPrinter = StderrDiagnosticPrinter(
+      colorMode: lintFormatOptions.colorDiagnostics.map { $0 ? .on : .off } ?? .auto)
+    self.diagnosticsEngine =
+      UnifiedDiagnosticsEngine(diagnosticsHandlers: [diagnosticPrinter.printDiagnostic])
   }
 
   /// Runs the linter or formatter over the inputs.
   final func run() {
-    let paths = lintFormatOptions.paths
-
-    if paths.isEmpty {
+    if lintFormatOptions.paths.isEmpty {
       processStandardInput()
     } else {
-      processPaths(paths, parallel: lintFormatOptions.parallel)
+      processURLs(
+        lintFormatOptions.paths.map(URL.init(fileURLWithPath:)),
+        parallel: lintFormatOptions.parallel)
     }
   }
 
@@ -109,8 +110,8 @@ class Frontend {
   /// Processes source content from standard input.
   private func processStandardInput() {
     guard let configuration = configuration(
-      atPath: lintFormatOptions.configurationPath,
-      orInferredFromSwiftFileAtPath: nil)
+      at: lintFormatOptions.configurationPath.map(URL.init(fileURLWithPath:)),
+      orInferredFromSwiftFileAt: nil)
     else {
       // Already diagnosed in the called method.
       return
@@ -118,47 +119,46 @@ class Frontend {
 
     let fileToProcess = FileToProcess(
       fileHandle: FileHandle.standardInput,
-      path: lintFormatOptions.assumeFilename ?? "<stdin>",
+      url: URL(fileURLWithPath: lintFormatOptions.assumeFilename ?? "<stdin>"),
       configuration: configuration)
     processFile(fileToProcess)
   }
 
-  /// Processes source content from a list of files and/or directories provided as paths.
-  private func processPaths(_ paths: [String], parallel: Bool) {
+  /// Processes source content from a list of files and/or directories provided as file URLs.
+  private func processURLs(_ urls: [URL], parallel: Bool) {
     precondition(
-      !paths.isEmpty,
-      "processPaths(_:) should only be called when paths is non-empty.")
+      !urls.isEmpty,
+      "processURLs(_:) should only be called when 'urls' is non-empty.")
 
     if parallel {
-      let allFilePaths = Array(FileIterator(paths: paths))
-      DispatchQueue.concurrentPerform(iterations: allFilePaths.count) { index in
-        let path = allFilePaths[index]
-        openAndProcess(path)
+      let filesToProcess = FileIterator(urls: urls).compactMap(openAndPrepareFile)
+      DispatchQueue.concurrentPerform(iterations: filesToProcess.count) { index in
+        processFile(filesToProcess[index])
       }
     } else {
-      for path in FileIterator(paths: paths) {
-        openAndProcess(path)
-      }
+      FileIterator(urls: urls).lazy.compactMap(openAndPrepareFile).forEach(processFile)
     }
   }
 
-  /// Read and process the given path, optionally synchronizing diagnostic output.
-  private func openAndProcess(_ path: String) -> Void {
-    guard let sourceFile = FileHandle(forReadingAtPath: path) else {
-      diagnosticEngine.diagnose(Diagnostic.Message(.error, "Unable to open \(path)"))
-      return
+  /// Read and prepare the file at the given path for processing, optionally synchronizing
+  /// diagnostic output.
+  private func openAndPrepareFile(at url: URL) -> FileToProcess? {
+    guard let sourceFile = try? FileHandle(forReadingFrom: url) else {
+      diagnosticsEngine.emitError(
+        "Unable to open \(url.relativePath): file is not readable or does not exist")
+      return nil
     }
 
-    guard let configuration = configuration(
-      atPath: lintFormatOptions.configurationPath, orInferredFromSwiftFileAtPath: path)
+    guard
+      let configuration = configuration(
+        at: lintFormatOptions.configurationPath.map(URL.init(fileURLWithPath:)),
+        orInferredFromSwiftFileAt: url)
     else {
       // Already diagnosed in the called method.
-      return
+      return nil
     }
 
-    let fileToProcess = FileToProcess(
-      fileHandle: sourceFile, path: path, configuration: configuration)
-    processFile(fileToProcess)
+    return FileToProcess(fileHandle: sourceFile, url: url, configuration: configuration)
   }
 
   /// Returns the configuration that applies to the given `.swift` source file, when an explicit
@@ -174,35 +174,31 @@ class Frontend {
   ///   `swiftFilePath` if one exists, or the default configuration otherwise. If an error occurred
   ///   when reading the configuration, a diagnostic is emitted and `nil` is returned.
   private func configuration(
-    atPath configurationFilePath: String?,
-    orInferredFromSwiftFileAtPath swiftFilePath: String?
+    at configurationFileURL: URL?,
+    orInferredFromSwiftFileAt swiftFileURL: URL?
   ) -> Configuration? {
     // If an explicit configuration file path was given, try to load it and fail if it cannot be
     // loaded. (Do not try to fall back to a path inferred from the source file path.)
-    if let configurationFilePath = configurationFilePath {
+    if let configurationFileURL = configurationFileURL {
       do {
-        return try configurationLoader.configuration(atPath: configurationFilePath)
+        return try configurationLoader.configuration(at: configurationFileURL)
       } catch {
-        diagnosticEngine.diagnose(
-          Diagnostic.Message(.error, "Unable to read configuration: \(error.localizedDescription)"))
+        diagnosticsEngine.emitError("Unable to read configuration: \(error.localizedDescription)")
         return nil
       }
     }
 
     // If no explicit configuration file path was given but a `.swift` source file path was given,
     // then try to load the configuration by inferring it based on the source file path.
-    if let swiftFilePath = swiftFilePath {
+    if let swiftFileURL = swiftFileURL {
       do {
-        if let configuration =
-          try configurationLoader.configuration(forSwiftFileAtPath: swiftFilePath)
-        {
+        if let configuration = try configurationLoader.configuration(forSwiftFileAt: swiftFileURL) {
           return configuration
         }
         // Fall through to the default return at the end of the function.
       } catch {
-        diagnosticEngine.diagnose(
-          Diagnostic.Message(.error, "Unable to read configuration for \(swiftFilePath): "
-            + "\(error.localizedDescription)"))
+        diagnosticsEngine.emitError(
+          "Unable to read configuration for \(swiftFileURL.path): \(error.localizedDescription)")
         return nil
       }
     }

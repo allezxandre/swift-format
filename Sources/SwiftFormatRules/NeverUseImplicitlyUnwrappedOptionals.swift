@@ -42,7 +42,7 @@ public final class NeverUseImplicitlyUnwrappedOptionals: SyntaxLintRule {
     // Ignores IBOutlet variables
     if let attributes = node.attributes {
       for attribute in attributes {
-        if (attribute.as(AttributeSyntax.self))?.attributeName.text == "IBOutlet" {
+        if (attribute.as(AttributeSyntax.self))?.attributeName.as(SimpleTypeIdentifierSyntax.self)?.name.text == "IBOutlet" {
           return .skipChildren
         }
       }
@@ -59,12 +59,12 @@ public final class NeverUseImplicitlyUnwrappedOptionals: SyntaxLintRule {
     guard let violation = type.as(ImplicitlyUnwrappedOptionalTypeSyntax.self) else { return }
     diagnose(
       .doNotUseImplicitUnwrapping(
-        identifier: violation.wrappedType.withoutTrivia().description), on: type)
+        identifier: violation.wrappedType.with(\.leadingTrivia, []).with(\.trailingTrivia, []).description), on: type)
   }
 }
 
-extension Diagnostic.Message {
-  public static func doNotUseImplicitUnwrapping(identifier: String) -> Diagnostic.Message {
-    return .init(.warning, "use \(identifier) or \(identifier)? instead of \(identifier)!")
+extension Finding.Message {
+  public static func doNotUseImplicitUnwrapping(identifier: String) -> Finding.Message {
+    "use \(identifier) or \(identifier)? instead of \(identifier)!"
   }
 }
